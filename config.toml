@@ -8,3 +8,21 @@ port = 9222                           # remote-debugging port, bound to 127.0.0.
 [data]
 dir = 'C:\Users\turbo\OneDrive\Documents\Bureaucracy\CV\JobBot'   # profile.md, applications.csv
 cv = 'C:\Users\turbo\OneDrive\Documents\Bureaucracy\CV\2026\David Datica - AI Engineer.pdf'
+
+[llm]
+backend = 'groq'                 # groq | claude-cli   (adapters live in jobbot/llm/)
+timeout_s = 30
+
+[llm.groq]                       # API key: `uv run python -m jobbot set-groq-key` (Windows Credential Manager)
+fast_model = 'openai/gpt-oss-20b'        # field matching (fastest production model, strict JSON)
+draft_model = 'openai/gpt-oss-120b'      # open-ended answers
+fallback_model = 'openai/gpt-oss-120b'   # used when fast_model hits its per-minute token limit
+reasoning_effort = 'low'                 # gpt-oss only: low | medium | high (higher = slower)
+
+[llm.claude]                     # alternative backend: Claude Code CLI (~6-7 s per call)
+exe = 'C:\Users\turbo\.local\bin\claude.exe'
+sandbox = '.llm-sandbox'
+fast_model = 'haiku'
+draft_model = 'sonnet'
+extra_flags = []
+use_json_schema = false          # true breaks under lockdown: StructuredOutput tool gets denied

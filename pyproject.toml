@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Semi-automated job applications: hotkey-driven form filling in a dedicated Brave profile."
 requires-python = ">=3.14,<3.15"
 dependencies = [
+    "httpx>=0.28.1",
     "keyring>=25.7.0",
     "playwright>=1.65.2",
 ]
