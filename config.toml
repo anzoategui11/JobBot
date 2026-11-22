@@ -1,0 +1,10 @@
+# JobBot settings. Paths may be absolute or relative to this file's folder.
+
+[brave]
+exe = 'C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe'
+profile_dir = 'BraveProfile'          # dedicated job-hunting profile (keep OUT of OneDrive)
+port = 9222                           # remote-debugging port, bound to 127.0.0.1
+
+[data]
+dir = 'C:\Users\turbo\OneDrive\Documents\Bureaucracy\CV\JobBot'   # profile.md, applications.csv
+cv = 'C:\Users\turbo\OneDrive\Documents\Bureaucracy\CV\2026\David Datica - AI Engineer.pdf'
