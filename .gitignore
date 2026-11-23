@@ -7,3 +7,4 @@ BraveProfile/
 state/
 pending.csv
 *.md
+!README.md
