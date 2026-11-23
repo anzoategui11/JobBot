@@ -11,6 +11,9 @@ def main() -> None:
     sub.add_parser("make-shortcut", help="create the JobBot desktop shortcut")
     sub.add_parser("llm-selftest", help="check the AI backend works and is locked down")
     sub.add_parser("set-groq-key", help="store your GroqCloud API key in Windows Credential Manager")
+    sp = sub.add_parser("seed-profile", help="draft profile.md from your CV (never overwrites it)")
+    sp.add_argument("--force", action="store_true", help="write profile.md even if it exists")
+    sub.add_parser("profile-check", help="show which profile.md facts are still blank")
     args = ap.parse_args()
 
     cfg = config.load()
@@ -36,6 +39,38 @@ def main() -> None:
             raise SystemExit("Nothing saved.")
         set_api_key(key)
         print("Saved to Windows Credential Manager (JobBot / groq-api-key).")
+    elif args.cmd == "seed-profile":
+        from .llm import get_backend
+        from .seed import seed
+
+        async def go():
+            b = get_backend(cfg)
+            try:
+                return await seed(cfg, b, force=args.force)
+            finally:
+                if hasattr(b, "aclose"):
+                    await b.aclose()
+        path = asyncio.run(go())
+        print(f"Wrote {path}")
+        if path.name != "profile.md":
+            print("profile.md already exists, so the draft went to this separate file. Copy what you want across.")
+        _profile_check(path)
+    elif args.cmd == "profile-check":
+        _profile_check(cfg.data_dir / "profile.md")
+
+
+def _profile_check(path) -> None:
+    from . import profile
+    if not path.exists():
+        raise SystemExit(f"{path} doesn't exist yet - run seed-profile first.")
+    prof = profile.load(path)
+    blank = [(s.name, k) for s in prof.sections.values() for k, v, _ in s.entries.values() if not v]
+    print(f"\n{path}: {len(prof.sections)} sections, "
+          f"{sum(len(s.entries) for s in prof.sections.values())} facts, {len(blank)} blank.")
+    if blank:
+        print("Blank (fill in now, or JobBot will ask the first time a form needs them):")
+        for section, key in blank:
+            print(f"  [{section}] {key}")
 
 
 if __name__ == "__main__":

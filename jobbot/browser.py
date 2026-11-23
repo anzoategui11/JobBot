@@ -6,7 +6,12 @@ from pathlib import Path
 from playwright.async_api import Page, async_playwright
 
 from .config import Config
+from . import fields
+from .flow import Session
+from .llm import get_backend
 from .launcher import ensure_brave
+from .llm.prompts import MAP_SYSTEM, map_prompt
+from .model import MapRequest
 
 AGENT_JS = Path(__file__).resolve().parent / "inject" / "agent.js"
 BINDING = "__jobbot"
@@ -16,15 +21,10 @@ async def show_panel(page: Page, text: str) -> None:
     await page.main_frame.evaluate("t => window.__jobbotPanel && window.__jobbotPanel.show(t)", text)
 
 
-async def on_message(source: dict, msg: dict) -> None:
-    page: Page = source["page"]
-    kind = msg.get("type") if isinstance(msg, dict) else None
-    if kind == "hotkey":
-        print(f"[hotkey] {page.url}", flush=True)
-        title = await page.title()
-        await show_panel(page, f"Hotkey received on: {title or page.url}")
-    else:
-        print(f"[ignored message] {msg!r}", flush=True)
+def estimate_tokens(ex: fields.Extraction, profile_md: str) -> int:
+    """Rough map-request size (~4 chars/token) to stay inside Groq's free-tier tokens-per-minute."""
+    req = MapRequest(ex.fields, profile_md, ex.job_text, ex.url, ex.title)
+    return (len(MAP_SYSTEM) + len(map_prompt(req))) // 4
 
 
 async def inject_existing(page: Page, script: str) -> None:
@@ -44,7 +44,9 @@ async def run(cfg: Config) -> None:
     async with async_playwright() as p:
         browser = await p.chromium.connect_over_cdp(f"http://127.0.0.1:{cfg.port}", is_local=True)
         ctx = browser.contexts[0]
-        await ctx.expose_binding(BINDING, on_message)
+        backend = get_backend(cfg)
+        session = Session(cfg.data_dir / "profile.md", cfg.cv_path, backend, script)
+        await ctx.expose_binding(BINDING, session.handle)
         await ctx.add_init_script(script=script)
         for page in ctx.pages:
             await inject_existing(page, script)
@@ -53,4 +55,6 @@ async def run(cfg: Config) -> None:
         browser.on("disconnected", lambda _: closed.set())
         print("JobBot ready - press Ctrl+Alt+G on a page. Close Brave to quit.", flush=True)
         await closed.wait()
+        if hasattr(backend, "aclose"):
+            await backend.aclose()
     print("Brave closed - JobBot stopped.", flush=True)

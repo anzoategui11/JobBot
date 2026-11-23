@@ -94,6 +94,27 @@ def test_rate_limit_falls_back_to_second_model():
     assert models == ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]
 
 
+def test_schema_failure_falls_back_to_second_model():
+    models = []
+
+    def handler(req):
+        m = json.loads(req.content)["model"]
+        models.append(m)
+        if m == "openai/gpt-oss-20b":
+            return httpx.Response(400, json={"error": {"message": "Failed to generate JSON.",
+                                                       "code": "json_validate_failed", "failed_generation": "{"}})
+        return _ok(GOOD)
+
+    async def go():
+        b = _backend(handler, fallback_model="openai/gpt-oss-120b")
+        res = await b.map_fields(MapRequest(FIELDS, "p", "j"))
+        await b.aclose()
+        return res
+
+    assert asyncio.run(go()).fills == {"f1": "Jane"}
+    assert models == ["openai/gpt-oss-20b", "openai/gpt-oss-120b"]
+
+
 def test_rate_limit_without_fallback_reports_wait():
     def handler(req):
         return httpx.Response(429, headers={"retry-after": "12"}, json={"error": {"message": "slow down"}})

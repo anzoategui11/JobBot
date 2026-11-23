@@ -1,0 +1,18 @@
+<!doctype html><html><body>
+<my-form></my-form>
+<script>
+customElements.define("my-form", class extends HTMLElement {
+  constructor() {
+    super();
+    const r = this.attachShadow({ mode: "open" });
+    const lab = document.createElement("label"); lab.htmlFor = "ln"; lab.textContent = "Last name";
+    const inp = document.createElement("input"); inp.id = "ln";
+    const inner = document.createElement("nested-bit");
+    r.append(lab, inp, inner);
+    const r2 = inner.attachShadow({ mode: "open" });
+    const s = document.createElement("span"); s.id = "yl"; s.textContent = "Years of experience";
+    const n = document.createElement("input"); n.type = "number"; n.setAttribute("aria-labelledby", "yl");
+    r2.append(s, n);
+  }
+});
+</script></body></html>

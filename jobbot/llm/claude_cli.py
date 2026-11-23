@@ -113,6 +113,9 @@ class ClaudeCli:
         raw = await self.call(self.fast_model, prompts.MAP_SYSTEM, prompts.map_prompt(req), MAP_SCHEMA)
         return validate_map(raw, req.fields)
 
+    async def extract(self, system: str, prompt: str, schema: dict, name: str) -> dict:
+        return await self.call(self.draft_model, system, prompt, schema)
+
     async def draft_answer(self, req: DraftRequest) -> str:
         raw = await self.call(self.draft_model, prompts.DRAFT_SYSTEM, prompts.draft_prompt(req), DRAFT_SCHEMA)
         try:

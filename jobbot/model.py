@@ -15,6 +15,8 @@ class FormField:
     options: list[str] = field(default_factory=list)
     required: bool = False
     current_value: str = ""
+    autocomplete: str = ""      # the page's autocomplete hint (e.g. "given-name"), a strong signal
+    accept: str = ""            # file inputs only: accepted types, used to spot the CV upload
 
 
 @dataclass

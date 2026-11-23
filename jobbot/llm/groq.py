@@ -39,6 +39,12 @@ class RateLimited(LLMError):
         super().__init__(f"Groq rate limit reached for {model}{wait}")
 
 
+class BadGeneration(LLMError):
+    """Groq rejected the model's own output as not matching the strict schema (HTTP 400 json_validate_failed)."""
+    def __init__(self, detail: str):
+        super().__init__(f"Groq model output failed the schema: {detail}")
+
+
 def get_api_key() -> str | None:
     return os.environ.get("GROQ_API_KEY") or keyring.get_password(KEYRING_SERVICE, KEYRING_USER)
 
@@ -117,8 +123,12 @@ class GroqBackend:
         except ValueError:
             raise LLMError(f"Groq HTTP {r.status_code}: non-JSON response")
         if r.status_code >= 400:
-            msg = (data.get("error") or {}).get("message") if isinstance(data, dict) else None
-            raise LLMError(f"Groq HTTP {r.status_code}: {msg or str(data)[:300]}")
+            err = (data.get("error") or {}) if isinstance(data, dict) else {}
+            msg = err.get("message") or str(data)[:300]
+            if err.get("failed_generation"):
+                msg += f" | failed_generation: {str(err['failed_generation'])[:400]}"
+            raise BadGeneration(msg) if err.get("code") == "json_validate_failed" else \
+                LLMError(f"Groq HTTP {r.status_code}: {msg}")
         self.last_meta = CallMeta(model, secs, r.headers.get("x-ratelimit-remaining-tokens"),
                                   r.headers.get("x-ratelimit-remaining-requests"), data)
         try:
@@ -131,11 +141,14 @@ class GroqBackend:
         args = (prompts.MAP_SYSTEM, prompts.map_prompt(req), MAP_SCHEMA, "form_fill")
         try:
             raw = await self.call(self.fast_model, *args)
-        except RateLimited:
+        except (RateLimited, BadGeneration):     # busy, or the small model broke the schema: try the big one
             if not self.fallback_model:
                 raise
             raw = await self.call(self.fallback_model, *args)
         return validate_map(raw, req.fields)
+
+    async def extract(self, system: str, prompt: str, schema: dict, name: str) -> dict:
+        return await self.call(self.draft_model, system, prompt, schema, name, max_tokens=6000)
 
     async def draft_answer(self, req: DraftRequest) -> str:
         raw = await self.call(self.draft_model, prompts.DRAFT_SYSTEM, prompts.draft_prompt(req),

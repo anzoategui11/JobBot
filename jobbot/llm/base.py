@@ -10,6 +10,10 @@ class Backend(Protocol):
 
     async def draft_answer(self, req: DraftRequest) -> str: ...
 
+    async def extract(self, system: str, prompt: str, schema: dict, name: str) -> dict:
+        """Generic structured extraction with the draft (higher quality) model. Output is unvalidated."""
+        ...
+
 
 class LLMError(RuntimeError):
     """The backend failed or returned something unusable."""
