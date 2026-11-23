@@ -12,8 +12,24 @@ from .fields import Extraction
 from .model import FormField
 
 
-async def apply(ex: Extraction, fills: dict[str, str]) -> dict[str, str]:
-    """Fill {field id: value}. Returns {field id: status} ("ok", "typed", "manual", "no such option", ...)."""
+async def values(ex: Extraction, ids: list[str]) -> dict[str, str | None]:
+    """Current full text of fields (None = no longer on the page)."""
+    out: dict[str, str | None] = {}
+    per_frame: dict[Frame, list[str]] = {}
+    for fid in ids:
+        if (frame := ex.frame_of.get(fid)) is not None:
+            per_frame.setdefault(frame, []).append(fid)
+    for frame, fids in per_frame.items():
+        try:
+            out.update(await frame.evaluate("ids => window.__jobbotValues(ids)", fids))
+        except Exception:
+            out.update({fid: None for fid in fids})
+    return out
+
+
+async def apply(ex: Extraction, fills: dict[str, str], if_empty: bool = False) -> dict[str, str]:
+    """Fill {field id: value}. Returns {field id: status} ("ok", "typed", "manual", "no such option", ...).
+    if_empty: leave fields you've typed into meanwhile alone ("kept")."""
     by_id = {f.id: f for f in ex.fields}
     per_frame: dict[Frame, list[dict]] = {}
     for fid, value in fills.items():
@@ -21,7 +37,7 @@ async def apply(ex: Extraction, fills: dict[str, str]) -> dict[str, str]:
         frame = ex.frame_of.get(fid)
         if f is None or frame is None or f.kind in ("file", "password"):
             continue
-        per_frame.setdefault(frame, []).append({"id": fid, "kind": f.kind, "value": value})
+        per_frame.setdefault(frame, []).append({"id": fid, "kind": f.kind, "value": value, "ifEmpty": if_empty})
     out: dict[str, str] = {}
     for frame, items in per_frame.items():
         try:

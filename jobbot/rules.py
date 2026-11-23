@@ -49,6 +49,32 @@ AUTOCOMPLETE = {"given-name": "First name", "family-name": "Last name", "name": 
 URL_KEYS = {"LinkedIn", "GitHub", "Website"}
 
 
+ENGLISH = re.compile(r"\b(english|ingl[eé]s)\b", re.I)
+# English proficiency options, best first; the first pattern that matches an option gives its rank.
+LEVELS = [
+    (-1, r"nativ|mother tongue|lengua materna"),   # never chosen: you're not a native speaker
+    (5, r"biling|\bc2\b|expert|fluent|fluid|fluent|full professional|dominio total"),
+    (3, r"upper.?intermediate|intermedio.?alto|\bb2\b"),
+    (4, r"advanced|avanzad|proficien|\bc1\b|professional working"),
+    (2, r"intermedi|\bb1\b|conversational|conversacional|limited working"),
+    (1, r"basic|b[aá]sic|elementa|beginner|principiante|\ba[12]\b"),
+    (0, r"^\s*(none|ninguno|no)\s*$"),
+]
+
+
+def english_level(f: FormField) -> str | None:
+    """For an English-level dropdown/radio, the highest level offered below Native (your standing instruction)."""
+    if f.kind not in CHOICE_KINDS or not ENGLISH.search(f.label):
+        return None
+    ranked = []
+    for i, opt in enumerate(f.options):
+        rank = next((r for r, pat in LEVELS if re.search(pat, opt, re.I)), None)
+        if rank is not None:
+            ranked.append((rank, i, opt))
+    usable = [r for r in ranked if r[0] >= 0]
+    return max(usable)[2] if len(ranked) >= 2 and usable else None
+
+
 def norm_label(s: str) -> str:
     s = re.sub(r"[*:?¿()\[\]]", " ", s.casefold()).replace("-", " ")
     return " ".join(s.split())
@@ -142,6 +168,8 @@ def plan(fields: list[FormField], p: Profile) -> Plan:
             out.salary.append(f)
         elif is_consent(f):
             out.consent.append(f)
+        elif (v := english_level(f)) is not None:
+            out.local[f.id] = v
         elif (v := _lookup(f, p, qa)) is not None and (v := _fit(f, v)) is not None:
             out.local[f.id] = v
         elif is_free_text(f):
@@ -149,6 +177,42 @@ def plan(fields: list[FormField], p: Profile) -> Plan:
         else:
             out.llm.append(f)
     return out
+
+
+_ES = {"de", "la", "que", "el", "los", "las", "por", "para", "con", "una", "un", "tu", "su", "es", "cual", "cuál",
+       "qué", "como", "cómo", "experiencia", "trabajo", "nos", "describe", "cuéntanos", "años", "puesto", "empresa"}
+_EN = {"the", "and", "to", "of", "you", "your", "with", "for", "is", "are", "what", "why", "how", "do", "have",
+       "experience", "work", "us", "about", "describe", "tell", "years", "role", "company", "would"}
+
+
+def detect_lang(text: str) -> str:
+    """'es', 'en' or '' (can't tell). Good enough to pick the answer language of a question or posting."""
+    words = re.findall(r"[a-záéíóúñü]+", text.casefold())
+    es = sum(w in _ES for w in words) + 2 * len(re.findall(r"[¿ñ]", text))
+    en = sum(w in _EN for w in words)
+    return "es" if es > en else "en" if en > es else ""
+
+
+def draft_words(label: str) -> int:
+    if re.search(r"cover letter|carta de presentaci", label, re.I):
+        return 250
+    if re.search(r"brief|short|one sentence|in a few words|breve|corto", label, re.I):
+        return 60
+    return 150
+
+
+DRAFT_HIDE = {"contact", "demographics", "salary history", "roles", "portals"}
+
+
+def profile_for_drafts(text: str) -> str:
+    """profile.md without the sections a draft never needs (contact details, demographics, salary, bot config)."""
+    out, skip = [], False
+    for line in text.splitlines():
+        if m := re.match(r"^##\s+(.+?)\s*#*\s*$", line):
+            skip = " ".join(m.group(1).split()).casefold() in DRAFT_HIDE
+        if not skip:
+            out.append(line)
+    return "\n".join(out)
 
 
 def last_salary(p: Profile, label: str) -> str:

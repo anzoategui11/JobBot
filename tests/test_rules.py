@@ -96,3 +96,19 @@ def test_bot_code_never_clicks_navigates_or_submits():
             assert bad not in src, f"{name} contains {bad}"
     js = (root / "inject" / "agent.js").read_text(encoding="utf-8")
     assert "submit(" not in js and "location.href =" not in js and "scrollIntoView" not in js
+
+
+def test_english_level_always_highest():
+    f = F("¿Cuál es tu nivel de inglés?", "select", options=["Básico", "Intermedio", "Avanzado", "Experto"])
+    assert rules.english_level(f) == "Experto"
+    assert rules.plan([f], PROF).local == {f.label: "Experto"}
+    g = F("English proficiency", "radio", options=["Native or bilingual", "Full professional", "Elementary"])
+    assert rules.english_level(g) == "Full professional"                     # never Native
+    n = F("Nivel de inglés", "select", options=["Básico", "Avanzado", "Nativo"])
+    assert rules.english_level(n) == "Avanzado"
+    h = F("English level", "select", options=["A1", "A2", "B1", "B2", "C1", "C2"])
+    assert rules.english_level(h) == "C2"
+    i = F("English level", "select", options=["Upper intermediate", "Advanced", "Intermediate"])
+    assert rules.english_level(i) == "Advanced"
+    assert rules.english_level(F("Do you speak English?", "radio", options=["Yes", "No"])) is None
+    assert rules.english_level(F("Nivel de alemán", "select", options=["Básico", "Experto"])) is None

@@ -1,9 +1,12 @@
 """What happens on Ctrl+Alt+G, and when you answer questions in the panel.
 
 hotkey  -> extract fields -> local rules -> LLM for the rest -> fill -> attach CV -> panel
+          -> (background) AI drafts for open questions -> fill empty ones -> panel badges them
 answers -> fill your answers -> save the ticked ones to profile.md -> conflicts shown for confirmation
+role    -> remembered; unedited drafts are redrafted for the new role
 """
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,8 +14,9 @@ from pathlib import Path
 from playwright.async_api import Page
 
 from . import fields, filler, profile, rules
+from . import state as saved_state
 from .llm.base import Backend, LLMError
-from .model import CHOICE_KINDS, FormField, JobInfo, MapRequest
+from .model import CHOICE_KINDS, DraftBatch, DraftQuestion, FormField, JobInfo, MapRequest
 
 MAX_ANSWER = 4000
 
@@ -35,6 +39,9 @@ class TabState:
     cv_done: set[str] = field(default_factory=set)
     spec: dict = field(default_factory=dict)                    # last panel contents
     seq: int = 0
+    drafts: dict[str, str] = field(default_factory=dict)        # field id -> AI draft written (not saved)
+    gen: int = 0                                                # bumps per hotkey; stale draft tasks don't repaint
+    task: asyncio.Task | None = None                            # running draft job
 
 
 def _answer_value(f: FormField, value: str) -> str:
@@ -52,10 +59,25 @@ async def show_text(page: Page, text: str) -> None:
 
 
 class Session:
-    def __init__(self, profile_path: Path, cv_path: Path, backend: Backend, script: str):
+    def __init__(self, profile_path: Path, cv_path: Path, backend: Backend, script: str,
+                 state_path: Path = saved_state.DEFAULT):
         self.profile_path, self.cv_path, self.backend, self.script = profile_path, cv_path, backend, script
+        self.state_path = state_path
+        self.saved = saved_state.load(state_path)
         self.states: dict[Page, TabState] = {}
         self.busy: set[Page] = set()
+
+    # ------------------------------------------------------------------ role (manual, remembered)
+    def roles(self, prof: profile.Profile) -> list[tuple[str, str]]:
+        return [(k, v) for k, v in prof.items("Roles") if k]
+
+    def role(self, prof: profile.Profile) -> str:
+        names = [r for r, _ in self.roles(prof)]
+        return self.saved.get("role") if self.saved.get("role") in names else (names[0] if names else "")
+
+    def cv_for(self, prof: profile.Profile) -> Path:
+        path = dict(self.roles(prof)).get(self.role(prof), "")
+        return Path(path) if path and Path(path).exists() else self.cv_path
 
     def state(self, page: Page) -> TabState:
         if page not in self.states:
@@ -73,7 +95,7 @@ class Session:
     async def handle(self, source: dict, msg: dict) -> None:
         page: Page = source["page"]
         kind = msg.get("type") if isinstance(msg, dict) else None
-        if kind not in ("hotkey", "answers", "replace") or page in self.busy:
+        if kind not in ("hotkey", "answers", "replace", "role") or page in self.busy:
             return
         self.busy.add(page)
         try:
@@ -81,6 +103,8 @@ class Session:
                 await self.on_hotkey(page)
             elif kind == "answers":
                 await self.on_answers(page, msg.get("answers"))
+            elif kind == "role":
+                await self.on_role(page, str(msg.get("role", "")))
             else:
                 await self.on_replace(page, str(msg.get("cid", "")))
         except Exception as e:
@@ -100,7 +124,9 @@ class Session:
         st = self.state(page)
         ex = await fields.extract(page, self.script)
         st.ex, st.questions, st.conflicts = ex, {}, {}
+        st.gen += 1
         prof = self._profile()
+        cv_path = self.cv_for(prof)
         plan = rules.plan(ex.fields, prof)
 
         fills = dict(plan.local)
@@ -148,10 +174,10 @@ class Session:
         for f in plan.cv:
             if f.id in st.cv_done:
                 continue
-            s = await filler.attach_cv(ex, f, self.cv_path)
+            s = await filler.attach_cv(ex, f, cv_path)
             if s == "ok":
                 st.cv_done.add(f.id)
-                cv_note = f" · CV attached ({self.cv_path.name})"
+                cv_note = f" · CV attached ({cv_path.name})"
             elif s == "already attached":
                 cv_note = " · CV already on the page"
             else:
@@ -163,22 +189,90 @@ class Session:
             questions.append((f, "", q if rules.norm_label(q) != rules.norm_label(f.label) else ""))
         for f in plan.salary:
             questions.append((f, rules.last_salary(prof, f.label), "Salary is never filled automatically."))
-        for f in plan.free_text:
-            questions.append((f, "", "AI drafts for open questions arrive in Stage 6."))
         for f in plan.consent:
             manual.append(f"{'Tick' if f.kind == 'checkbox' else 'Answer'} yourself: {f.label}")
 
         secs = time.perf_counter() - t0
         timing = f" in {secs:.1f} s" + (f" (AI {llm_secs:.1f} s)" if llm_secs is not None else "")
         head = f"Filled {ok} field{'s' if ok != 1 else ''}{timing}{cv_note}." if ok or cv_note else \
-            ("Nothing to fill on this page." if not questions else f"Checked the form{timing}.")
+            ("Nothing to fill on this page." if not (questions or plan.free_text) else f"Checked the form{timing}.")
         if "dialog" in ex.headings:
             head += f"\nForm: {ex.headings['dialog']}"
+        if plan.free_text:
+            head += f"\nDrafting {len(plan.free_text)} answer{'s' if len(plan.free_text) != 1 else ''}…"
         head += "\nReview everything, then submit yourself."
         st.spec = {"status": head, "questions": self._questions(st, questions, prof), "manual": manual,
-                   "notes": notes}
+                   "notes": notes, "roles": [r for r, _ in self.roles(prof)], "role": self.role(prof),
+                   "drafts": []}
         print(head.replace("\n", " | "), flush=True)
         await show(page, st.spec)
+        if plan.free_text:
+            st.task = asyncio.create_task(self._draft(page, st, st.gen, plan.free_text, prof, ex))
+
+    # ------------------------------------------------------------------ AI drafts (background)
+    async def _draft(self, page: Page, st: TabState, gen: int, todo: list[FormField],
+                     prof: profile.Profile, ex: fields.Extraction, redraft: bool = False) -> None:
+        try:
+            job_lang = rules.detect_lang(ex.job_text) or st.job.language
+            qs = [DraftQuestion(f.id, f.label, rules.detect_lang(f.label) or job_lang or "en",
+                                rules.draft_words(f.label)) for f in todo]
+            t0 = time.perf_counter()
+            notes, questions = [], []
+            try:
+                drafts = await self.backend.draft_answers(DraftBatch(
+                    qs, ex.job_text, rules.profile_for_drafts(prof.text), self.role(prof)))
+            except LLMError as e:
+                drafts = {}
+                notes.append(f"AI drafts unavailable: {e}")
+            secs = time.perf_counter() - t0
+            status = await filler.apply(ex, drafts, if_empty=not redraft) if drafts else {}
+            written = []
+            for f in todo:
+                s = status.get(f.id)
+                if s == "ok":
+                    st.drafts[f.id] = st.filled[f.id] = drafts[f.id]
+                    written.append(f.label)
+                elif s == "kept":
+                    notes.append(f"You'd already typed in “{f.label}”, so the draft wasn't used.")
+                elif not redraft:
+                    questions.append((f, drafts.get(f.id, ""), "Write your answer (no AI draft)."))
+            if st.gen != gen or page.is_closed():
+                return                                  # you moved on to another step: don't repaint
+            status_line = (f"Drafted {len(written)} answer{'s' if len(written) != 1 else ''} in {secs:.1f} s"
+                           f"{' for ' + self.role(prof) if self.role(prof) else ''}.") if written else \
+                "No AI drafts written."
+            old = [ln for ln in st.spec.get("status", "").split("\n") if not ln.startswith("Drafting")]
+            if redraft:
+                old = [ln for ln in old if not ln.startswith(("Redrafting", "Drafted"))]
+            head = "\n".join([*old[:-1], status_line, old[-1]]) if old else status_line
+            st.spec = {**st.spec, "status": head,
+                       "drafts": sorted(set(st.spec.get("drafts", [])) | set(written)),
+                       "questions": st.spec.get("questions", []) + self._questions(st, questions, prof),
+                       "notes": st.spec.get("notes", []) + notes}
+            print(status_line, flush=True)
+            await show(page, st.spec)
+        except Exception as e:                           # background task: report, never crash the session
+            print(f"[draft error] {type(e).__name__}: {e}", flush=True)
+
+    async def on_role(self, page: Page, role: str) -> None:
+        st = self.state(page)
+        prof = self._profile()
+        if role not in [r for r, _ in self.roles(prof)]:
+            return
+        self.saved["role"] = role
+        saved_state.save(self.saved, self.state_path)
+        st.spec = {**st.spec, "role": role}
+        if not (st.ex and st.drafts):
+            return
+        current = await filler.values(st.ex, list(st.drafts))
+        norm = lambda t: " ".join((t or "").split())
+        untouched = [f for f in st.ex.fields if f.id in st.drafts and norm(current.get(f.id)) == norm(st.drafts[f.id])]
+        if not untouched:
+            return
+        lines = st.spec.get("status", "").split("\n")
+        st.spec["status"] = "\n".join([f"Redrafting {len(untouched)} answer(s) for {role}…", *lines[-1:]])
+        await show(page, st.spec)
+        st.task = asyncio.create_task(self._draft(page, st, st.gen, untouched, prof, st.ex, redraft=True))
 
     def _questions(self, st: TabState, items: list[tuple[FormField, str, str]], prof: profile.Profile) -> list[dict]:
         out = []

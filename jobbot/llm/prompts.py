@@ -3,7 +3,7 @@
 import json
 from datetime import date
 
-from ..model import DraftRequest, MapRequest, LOCAL_ONLY_KINDS
+from ..model import DraftBatch, DraftRequest, MapRequest, LOCAL_ONLY_KINDS
 
 MAP_JOB_CHARS = 2500   # mapping only needs company/title/basics; keeps requests ~3K tokens (free-tier TPM)
 
@@ -24,6 +24,8 @@ Rules:
 - Write values in the language the form uses.
 - Resolve relative profile values (e.g. "2 weeks from now") against Today in <page>; date fields get a concrete date.
 - Never fill salary / compensation / pay expectation fields: always put them in "unknown".
+- English proficiency "select"/"radio" fields: always choose the highest level among the options, except
+  never "Native" / "Bilingual native" (the applicant is not a native English speaker).
 - Fields with a current_value that is already correct can be left out.
 - Also extract the job's company, position title, location and posting language (en, es or other).
 {UNTRUSTED}"""
@@ -66,4 +68,25 @@ def draft_prompt(req: DraftRequest) -> str:
         f"Role the applicant is targeting: {req.role or 'not specified'}\n"
         f"Answer in {lang}, at most {req.max_words} words.\n\n"
         f"<question>\n{req.question}\n</question>"
+    )
+
+
+DRAFTS_SYSTEM = f"""You draft answers to open-ended job application questions for one applicant.
+Write in first person as the applicant, grounded only in facts from <profile>; never invent experience,
+employers, numbers or credentials. Be specific to this job and role, concise and natural; no greetings,
+no sign-off, no placeholders, no markdown. Answer EVERY question in <questions>, each in its "language"
+and within its "max_words". Return JSON matching the provided schema, nothing else.
+{UNTRUSTED}"""
+
+_LANG = {"es": "Spanish", "en": "English"}
+
+
+def drafts_prompt(batch: DraftBatch) -> str:
+    qs = [{"id": q.id, "question": q.question, "language": _LANG.get(q.language, "same as the question"),
+           "max_words": q.max_words} for q in batch.questions]
+    return (
+        f"<profile>\n{batch.profile_md}\n</profile>\n\n"
+        f"<job_posting>\n{batch.job_text}\n</job_posting>\n\n"
+        f"Role the applicant is targeting: {batch.role or 'not specified'}\n\n"
+        f"<questions>\n{json.dumps(qs, ensure_ascii=False)}\n</questions>"
     )

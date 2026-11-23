@@ -46,6 +46,9 @@ MAX_META = 200
 _CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
+_CTRL_KEEP_NL = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")   # drafts may keep paragraph breaks
+
+
 def clean(s: object, limit: int = MAX_VALUE) -> str:
     return _CTRL.sub("", str(s)).strip()[:limit]
 
@@ -125,6 +128,35 @@ def validate_map(raw: dict, fields: list[FormField]) -> MapResult:
             unknown[fid] = f.label
 
     return MapResult(job=job, fills=fills, unknown=unknown, dropped=dropped)
+
+
+DRAFTS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["answers"],
+    "properties": {"answers": {"type": "array", "items": {
+        "type": "object", "additionalProperties": False, "required": ["id", "answer"],
+        "properties": {"id": _str, "answer": _str}}}},
+}
+
+
+def validate_drafts(raw: dict, questions) -> dict[str, str]:
+    """{field id: answer} for requested ids only; non-empty, length-capped by each question's word budget."""
+    want = {q.id: q for q in questions}
+    out: dict[str, str] = {}
+    for item in raw.get("answers") or []:
+        if not isinstance(item, dict):
+            continue
+        q = want.get(str(item.get("id", "")))
+        if q is None or q.id in out:
+            continue
+        text = _CTRL_KEEP_NL.sub("", str(item.get("answer", ""))).strip()
+        words = text.split(" ")
+        if len(words) > q.max_words * 1.3:
+            text = " ".join(words[: int(q.max_words * 1.3)]).rstrip(",;:") + "…"
+        if text:
+            out[q.id] = text[: q.max_words * 12]
+    return out
 
 
 def validate_draft(raw: dict) -> str:

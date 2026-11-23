@@ -21,10 +21,10 @@ from dataclasses import dataclass, field
 import httpx
 import keyring
 
-from ..model import DraftRequest, MapRequest, MapResult
+from ..model import DraftBatch, DraftRequest, MapRequest, MapResult
 from . import prompts
 from .base import LLMError
-from .schemas import DRAFT_SCHEMA, MAP_SCHEMA, extract_json, validate_draft, validate_map
+from .schemas import DRAFT_SCHEMA, DRAFTS_SCHEMA, MAP_SCHEMA, extract_json, validate_draft, validate_drafts, validate_map
 
 BASE_URL = "https://api.groq.com/openai/v1"
 KEYRING_SERVICE = "JobBot"
@@ -157,3 +157,9 @@ class GroqBackend:
             return validate_draft(raw)
         except ValueError as e:
             raise LLMError(str(e))
+
+    async def draft_answers(self, batch: DraftBatch) -> dict[str, str]:
+        budget = min(6000, 800 + sum(q.max_words * 3 for q in batch.questions))   # words->tokens + reasoning
+        raw = await self.call(self.draft_model, prompts.DRAFTS_SYSTEM, prompts.drafts_prompt(batch),
+                              DRAFTS_SCHEMA, "draft_answers", max_tokens=budget)
+        return validate_drafts(raw, batch.questions)

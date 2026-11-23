@@ -6,3 +6,4 @@ BraveProfile/
 !.llm-sandbox/.keep
 state/
 pending.csv
+*.md

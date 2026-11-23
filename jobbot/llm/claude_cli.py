@@ -20,10 +20,10 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..model import DraftRequest, MapRequest, MapResult
+from ..model import DraftBatch, DraftRequest, MapRequest, MapResult
 from . import prompts
 from .base import LLMError
-from .schemas import DRAFT_SCHEMA, MAP_SCHEMA, extract_json, validate_draft, validate_map
+from .schemas import DRAFT_SCHEMA, DRAFTS_SCHEMA, MAP_SCHEMA, extract_json, validate_draft, validate_drafts, validate_map
 
 SCRUB_EXACT = {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL"}
 SCRUB_PREFIX = ("CLAUDE_CODE_USE_",)
@@ -122,3 +122,7 @@ class ClaudeCli:
             return validate_draft(raw)
         except ValueError as e:
             raise LLMError(str(e))
+
+    async def draft_answers(self, batch: DraftBatch) -> dict[str, str]:
+        raw = await self.call(self.draft_model, prompts.DRAFTS_SYSTEM, prompts.drafts_prompt(batch), DRAFTS_SCHEMA)
+        return validate_drafts(raw, batch.questions)

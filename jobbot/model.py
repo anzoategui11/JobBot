@@ -52,3 +52,20 @@ class DraftRequest:
     role: str = ""
     language: str = "en"
     max_words: int = 180
+
+
+@dataclass
+class DraftQuestion:
+    id: str                     # field id on the page
+    question: str
+    language: str = "en"        # en | es | other (= the question's own language)
+    max_words: int = 150
+
+
+@dataclass
+class DraftBatch:
+    """Several open questions answered in one request (the profile is sent once: free-tier token budget)."""
+    questions: list[DraftQuestion]
+    job_text: str
+    profile_md: str
+    role: str = ""

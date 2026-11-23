@@ -2,7 +2,7 @@
 // Written as one expression (IIFE) so it works both as an init script and via frame.evaluate().
 // No innerHTML anywhere: some sites enforce Trusted Types.
 (() => {
-  const VERSION = 5;                       // bump when this file changes: tabs with an older copy get this one
+  const VERSION = 6;                       // bump when this file changes: tabs with an older copy get this one
   if ((window.__jobbotLoaded || 0) >= VERSION) return;
   window.__jobbotLoaded = VERSION;
   const me = {};
@@ -303,10 +303,21 @@
     return false;
   }
 
-  async function fillOne({ id, kind, value }) {
+  function currentText(el) {
+    return el.isContentEditable && !("value" in el) ? el.innerText : (el.value || "");
+  }
+
+  window.__jobbotValues = (ids) => {
+    const out = {};
+    for (const id of ids) { const el = elementsFor(id)[0]; out[id] = el ? currentText(el) : null; }
+    return out;
+  };
+
+  async function fillOne({ id, kind, value, ifEmpty }) {
     const els = elementsFor(id);
     if (!els.length) return "gone";
     const el = els[0];
+    if (ifEmpty && currentText(el).trim()) return "kept";        // you typed something meanwhile
     if (kind === "radio") {
       const opt = els.find((e) => same(e.getAttribute("data-jobbot-opt") || "", value));
       if (!opt) return "no such option";
@@ -392,12 +403,19 @@
     li { margin: 2px 0; }
     .notes { font-size: 12px; color: #777; }
     .conflict { margin: 0 0 10px; }
+    .rolebar { display: flex; gap: 8px; align-items: center; font-weight: 500; margin: 0 0 10px; }
+    .rolebar select { flex: 1; padding: 4px 6px; font: inherit; border: 1px solid #bbb; border-radius: 6px;
+                      background: #fff; color: inherit; }
+    .badge { font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: 8px;
+             background: #fff3cd; color: #7a5b00; }
     @media (prefers-color-scheme: dark) {
       .box { background: #1f1f1f; color: #eee; border-color: #444; }
       .head { border-color: #333; }
       .close, h4, .notes, .q .hint, .save { color: #aaa; }
       .q input[type=text], .q select, .q textarea { background: #2a2a2a; border-color: #555; }
       button.small { color: #6cb4ff; border-color: #6cb4ff; }
+      .rolebar select { background: #2a2a2a; border-color: #555; }
+      .badge { background: #4a3d10; color: #ffd866; }
     }`;
 
   let host = null, body = null;
@@ -476,7 +494,23 @@
     },
     render(spec) {
       mount();
-      const parts = [el("p", { class: "status", text: spec.status || "" })];
+      const parts = [];
+      if (spec.roles && spec.roles.length) {
+        const sel = el("select", { class: "role", title: "Role you're applying as (shapes AI drafts and the CV)",
+          onchange: () => send({ type: "role", role: sel.value }) });
+        for (const r of spec.roles) {
+          const o = el("option", { value: r, text: r });
+          if (r === spec.role) o.selected = true;
+          sel.append(o);
+        }
+        parts.push(el("label", { class: "rolebar" }, document.createTextNode("Role "), sel));
+      }
+      parts.push(el("p", { class: "status", text: spec.status || "" }));
+      if (spec.drafts && spec.drafts.length) {
+        parts.push(el("h4", { text: "AI drafts – review before submitting" }),
+                   el("ul", {}, ...spec.drafts.map((d) => el("li", {},
+                     el("span", { class: "badge", text: "AI draft" }), document.createTextNode(" " + d)))));
+      }
       if (spec.conflicts && spec.conflicts.length) {
         parts.push(el("h4", { text: "Profile conflicts" }));
         for (const c of spec.conflicts) {
