@@ -96,6 +96,29 @@ def flush_pending(path: Path, pending: Path = PENDING) -> int:
     return len(fresh)
 
 
+def _words(s: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9áéíóúñü+#]+", (s or "").casefold()))
+
+
+def previous(path: Path, links: list[str], company: str = "", position: str = "",
+             pending: Path = PENDING) -> tuple[str, dict] | None:
+    """Have you applied here before? ("link", row) for the same application link,
+    ("similar", row) for the same company with (nearly) the same position title, else None."""
+    rows = _read_rows(path) + _read_rows(pending)
+    keys = {normalize_link(u) for u in links if u}
+    for row in rows:
+        if normalize_link(row.get("Application link", "")) in keys:
+            return "link", row
+    comp, pos = _words(company), _words(position)
+    if comp and pos:
+        for row in rows:
+            if _words(row.get("Company", "")) == comp:
+                other = _words(row.get("Position", ""))
+                if other and len(pos & other) / len(pos | other) >= 0.75:
+                    return "similar", row
+    return None
+
+
 def log(path: Path, row: dict, pending: Path = PENDING, today: date | None = None) -> tuple[str, dict]:
     """Append one application. Returns ("added" | "duplicate" | "pending", the row written or found)."""
     flush_pending(path, pending)

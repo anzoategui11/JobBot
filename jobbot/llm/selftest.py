@@ -133,12 +133,20 @@ async def _check_claude_auth(b, r: Report) -> bool:
     return True
 
 
-async def run_selftest(cfg: Config) -> bool:
+async def run_selftest(cfg: Config, backup: bool = False) -> bool:
+    """Checks the main backend alone, or with backup=True the backup backend alone (OpenRouter)."""
     r = Report()
-    b = get_backend(cfg)
-    r.add("INFO", "backend", cfg.llm.backend)
+    if backup:
+        from .openrouter import OpenRouterBackend
+        o = cfg.llm.openrouter
+        b = OpenRouterBackend(o.fast_model, o.draft_model, o.draft_model, o.reasoning_effort, cfg.llm.timeout_s,
+                              zdr=o.zdr)
+        r.add("INFO", "backend", f"openrouter (backup), zero data retention: {o.zdr}")
+    else:
+        b = get_backend(cfg, with_backup=False)
+        r.add("INFO", "backend", cfg.llm.backend)
     try:
-        if cfg.llm.backend == "claude-cli":
+        if cfg.llm.backend == "claude-cli" and not backup:
             if not await _check_claude_auth(b, r):
                 return False
             await _check_claude_lockdown(b, r)

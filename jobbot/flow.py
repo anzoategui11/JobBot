@@ -64,11 +64,13 @@ def _answer_value(f: FormField, value: str) -> str:
 
 
 async def show(page: Page, spec: dict) -> None:
-    await page.main_frame.evaluate("s => window.__jobbotPanel && window.__jobbotPanel.render(s)", spec)
+    await fields.evaluate(page.main_frame, "s => window.__jobbotPanel && window.__jobbotPanel.render(s)", spec,
+                          timeout=5)
 
 
 async def show_text(page: Page, text: str) -> None:
-    await page.main_frame.evaluate("t => window.__jobbotPanel && window.__jobbotPanel.show(t)", text)
+    await fields.evaluate(page.main_frame, "t => window.__jobbotPanel && window.__jobbotPanel.show(t)", text,
+                          timeout=5)
 
 
 class Session:
@@ -118,9 +120,14 @@ class Session:
             if isinstance(value, str):
                 self.state(page).edits[fid] = value[:MAX_ANSWER]
             return
-        if kind not in ("hotkey", "answers", "replace", "role", "log_form", "log", "learn") or page in self.busy:
+        if kind not in ("hotkey", "answers", "replace", "role", "log_form", "log", "learn"):
             return
-        self.busy.add(page)
+        # Logging never waits behind a slow fill (and a stuck page can't lock you out of it).
+        exclusive = kind not in ("log_form", "log", "learn")
+        if exclusive and page in self.busy:
+            return
+        if exclusive:
+            self.busy.add(page)
         try:
             if kind == "hotkey":
                 await self.on_hotkey(page)
@@ -143,7 +150,8 @@ class Session:
             except Exception:
                 pass
         finally:
-            self.busy.discard(page)
+            if exclusive:
+                self.busy.discard(page)
 
     # ------------------------------------------------------------------ hotkey
     async def on_hotkey(self, page: Page) -> None:
@@ -175,6 +183,8 @@ class Session:
                 fills.update(res.fills)
                 unknown = res.unknown
                 notes += [f"Rejected AI answer: {d}" for d in res.dropped]
+                if note := getattr(self.backend, "take_note", lambda: "")():
+                    notes.append(note)
                 st.job = JobInfo(res.job.company or st.job.company, res.job.position or st.job.position,
                                  res.job.location or st.job.location, res.job.language)
             except LLMError as e:
@@ -259,7 +269,7 @@ class Session:
         head += "\nReview everything, then submit yourself."
         st.spec = {"status": head, "questions": self._questions(st, questions, prof), "manual": manual,
                    "notes": notes, "roles": [r for r, _ in self.roles(prof)], "role": self.role(prof),
-                   "drafts": [], "can_log": not st.logged}
+                   "drafts": [], "can_log": not st.logged, "warning": self._already_applied(page, st)}
         print(head.replace("\n", " | "), flush=True)
         await show(page, st.spec)
         if plan.free_text:
@@ -277,6 +287,8 @@ class Session:
             try:
                 drafts = await self.backend.draft_answers(DraftBatch(
                     qs, ex.job_text, rules.profile_for_drafts(prof.text), self.role(prof)))
+                if note := getattr(self.backend, "take_note", lambda: "")():
+                    notes.append(note)
             except LLMError as e:
                 drafts = {}
                 notes.append(f"AI drafts unavailable: {e}")
@@ -329,6 +341,24 @@ class Session:
         st.spec["status"] = "\n".join([f"Redrafting {len(untouched)} answer(s) for {role}…", *lines[-1:]])
         await show(page, st.spec)
         st.task = asyncio.create_task(self._draft(page, st, st.gen, untouched, prof, st.ex, redraft=True))
+
+    def _already_applied(self, page: Page, st: TabState) -> str:
+        """Panel warning when applications.csv already has this application (same link, or same company + title)."""
+        try:
+            hit = applog.previous(self.log_path, [page.url, st.apply_url], st.job.company, st.job.position,
+                                  self.pending_path)
+        except Exception as e:                       # a broken CSV must never block filling
+            print(f"[already-applied check] {type(e).__name__}: {e}", flush=True)
+            return ""
+        if not hit:
+            return ""
+        how, row = hit
+        what = f"{row.get('Company', '')} – {row.get('Position', '')}".strip(" –")
+        when = row.get("Date", "?")
+        status = row.get("Status", "")
+        if how == "link":
+            return f"You already applied here on {when} ({what}, status: {status})."
+        return f"Possibly already applied: {what} on {when} (status: {status}), from {row.get('Portal', '?')}."
 
     async def _choose(self, ex: fields.Extraction, choices: dict[str, list[str]], fills: dict[str, str],
                       prof: profile.Profile) -> dict[str, str]:

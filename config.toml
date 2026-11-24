@@ -11,6 +11,7 @@ cv = 'C:\Users\turbo\OneDrive\Documents\Bureaucracy\CV\2026\David Datica - AI En
 
 [llm]
 backend = 'groq'                 # groq | claude-cli   (adapters live in jobbot/llm/)
+backup = 'openrouter'            # used automatically when the backend fails; needs `set-openrouter-key` ('' = off)
 timeout_s = 30
 
 [llm.groq]                       # API key: `uv run python -m jobbot set-groq-key` (Windows Credential Manager)
@@ -18,6 +19,12 @@ fast_model = 'openai/gpt-oss-20b'        # field matching (fastest production mo
 draft_model = 'openai/gpt-oss-120b'      # open-ended answers
 fallback_model = 'openai/gpt-oss-120b'   # used when fast_model hits its per-minute token limit
 reasoning_effort = 'low'                 # gpt-oss only: low | medium | high (higher = slower)
+
+[llm.openrouter]                 # backup. Key: `uv run python -m jobbot set-openrouter-key`. Needs a few $ of credit
+fast_model = 'openai/gpt-oss-20b'        # ~$0.03 / M input tokens: a fraction of a cent per application
+draft_model = 'openai/gpt-oss-120b'
+reasoning_effort = 'low'
+zdr = true                               # only Zero Data Retention endpoints; providers that train on data are refused
 
 [llm.claude]                     # alternative backend: Claude Code CLI (~6-7 s per call)
 exe = 'C:\Users\turbo\.local\bin\claude.exe'

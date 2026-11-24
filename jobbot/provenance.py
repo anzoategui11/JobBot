@@ -5,6 +5,7 @@ then older pages, then the opener tab); otherwise "Company site". Search engines
 Google result never counts.
 """
 
+import asyncio
 from urllib.parse import urlsplit
 
 from playwright.async_api import Page
@@ -68,7 +69,7 @@ class Provenance:
     async def portal(self, page: Page, portals: dict[str, str]) -> str:
         urls = self.trail(page)
         try:
-            ref = await page.evaluate("document.referrer")
+            ref = await asyncio.wait_for(page.evaluate("document.referrer"), 3)
             if ref:
                 urls.append(ref)
         except Exception:

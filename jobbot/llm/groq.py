@@ -33,16 +33,16 @@ STRICT_MODELS = {"openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b"
 
 
 class RateLimited(LLMError):
-    def __init__(self, model: str, retry_after: float | None):
+    def __init__(self, model: str, retry_after: float | None, provider: str = "Groq"):
         self.model, self.retry_after = model, retry_after
         wait = f" - try again in {retry_after:.0f}s" if retry_after else ""
-        super().__init__(f"Groq rate limit reached for {model}{wait}")
+        super().__init__(f"{provider} rate limit reached for {model}{wait}")
 
 
 class BadGeneration(LLMError):
-    """Groq rejected the model's own output as not matching the strict schema (HTTP 400 json_validate_failed)."""
-    def __init__(self, detail: str):
-        super().__init__(f"Groq model output failed the schema: {detail}")
+    """The model's own output didn't match the strict schema (Groq: HTTP 400 json_validate_failed)."""
+    def __init__(self, detail: str, provider: str = "Groq"):
+        super().__init__(f"{provider} model output failed the schema: {detail}")
 
 
 def get_api_key() -> str | None:
@@ -63,6 +63,19 @@ class CallMeta:
 
 
 class GroqBackend:
+    NAME = "Groq"
+    BASE_URL = BASE_URL
+    NO_KEY = "No Groq API key. Create one at console.groq.com/keys, then run: uv run python -m jobbot set-groq-key"
+
+    def api_key(self) -> str | None:
+        return get_api_key()
+
+    def headers(self, key: str) -> dict:
+        return {"Authorization": f"Bearer {key}"}
+
+    def strict(self, model: str) -> bool:
+        return model in STRICT_MODELS
+
     def __init__(self, fast_model: str = "openai/gpt-oss-20b", draft_model: str = "openai/gpt-oss-120b",
                  fallback_model: str = "", reasoning_effort: str = "low", timeout_s: float = 30,
                  api_key: str | None = None, transport: httpx.AsyncBaseTransport | None = None):
@@ -75,13 +88,12 @@ class GroqBackend:
 
     def _http(self) -> httpx.AsyncClient:
         if self._client is None:
-            key = self._api_key or get_api_key()
+            key = self._api_key or self.api_key()
             if not key:
-                raise LLMError("No Groq API key. Create one at console.groq.com/keys, then run: "
-                               "uv run python -m jobbot set-groq-key")
+                raise LLMError(self.NO_KEY)
             # One long-lived client: keep-alive avoids a TLS handshake per hotkey press.
-            self._client = httpx.AsyncClient(base_url=BASE_URL, timeout=self._timeout, transport=self._transport,
-                                             headers={"Authorization": f"Bearer {key}"})
+            self._client = httpx.AsyncClient(base_url=self.BASE_URL, timeout=self._timeout,
+                                             transport=self._transport, headers=self.headers(key))
         return self._client
 
     async def aclose(self) -> None:
@@ -90,7 +102,7 @@ class GroqBackend:
             self._client = None
 
     def body(self, model: str, system: str, prompt: str, schema: dict, name: str, max_tokens: int) -> dict:
-        if model in STRICT_MODELS:
+        if self.strict(model):
             fmt = {"type": "json_schema", "json_schema": {"name": name, "strict": True, "schema": schema}}
         else:
             fmt = {"type": "json_object"}
@@ -113,29 +125,33 @@ class GroqBackend:
             r = await self._http().post("/chat/completions",
                                         json=self.body(model, system, prompt, schema, name, max_tokens))
         except httpx.HTTPError as e:
-            raise LLMError(f"Groq request failed: {type(e).__name__}: {e}")
+            raise LLMError(f"{self.NAME} request failed: {type(e).__name__}: {e}")
         secs = time.perf_counter() - t0
         if r.status_code == 429:
             ra = r.headers.get("retry-after")
-            raise RateLimited(model, float(ra) if ra and ra.replace(".", "", 1).isdigit() else None)
+            raise RateLimited(model, float(ra) if ra and ra.replace(".", "", 1).isdigit() else None, self.NAME)
         try:
             data = r.json()
         except ValueError:
-            raise LLMError(f"Groq HTTP {r.status_code}: non-JSON response")
+            raise LLMError(f"{self.NAME} HTTP {r.status_code}: non-JSON response")
         if r.status_code >= 400:
             err = (data.get("error") or {}) if isinstance(data, dict) else {}
             msg = err.get("message") or str(data)[:300]
             if err.get("failed_generation"):
                 msg += f" | failed_generation: {str(err['failed_generation'])[:400]}"
-            raise BadGeneration(msg) if err.get("code") == "json_validate_failed" else \
-                LLMError(f"Groq HTTP {r.status_code}: {msg}")
+            raise self.http_error(r.status_code, err, msg)
         self.last_meta = CallMeta(model, secs, r.headers.get("x-ratelimit-remaining-tokens"),
                                   r.headers.get("x-ratelimit-remaining-requests"), data)
         try:
             content = data["choices"][0]["message"]["content"] or ""
             return extract_json(content)
         except (KeyError, IndexError, TypeError, ValueError) as e:
-            raise LLMError(f"unusable Groq output: {e}")
+            raise LLMError(f"unusable {self.NAME} output: {e}")
+
+    def http_error(self, status: int, err: dict, msg: str) -> LLMError:
+        if err.get("code") == "json_validate_failed":
+            return BadGeneration(msg, self.NAME)
+        return LLMError(f"{self.NAME} HTTP {status}: {msg}")
 
     async def map_fields(self, req: MapRequest) -> MapResult:
         args = (prompts.MAP_SYSTEM, prompts.map_prompt(req), MAP_SCHEMA, "form_fill")

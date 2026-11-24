@@ -14,6 +14,14 @@ class GroqConfig:
 
 
 @dataclass(frozen=True)
+class OpenRouterConfig:
+    fast_model: str = "openai/gpt-oss-20b"
+    draft_model: str = "openai/gpt-oss-120b"
+    reasoning_effort: str = "low"
+    zdr: bool = True                             # Zero Data Retention endpoints only
+
+
+@dataclass(frozen=True)
 class ClaudeConfig:
     exe: Path = Path.home() / ".local" / "bin" / "claude.exe"
     sandbox: Path = ROOT / ".llm-sandbox"
@@ -26,8 +34,10 @@ class ClaudeConfig:
 @dataclass(frozen=True)
 class LlmConfig:
     backend: str = "groq"           # groq | claude-cli
+    backup: str = "openrouter"      # openrouter | "" (none); only used when its API key is stored
     timeout_s: float = 30
     groq: GroqConfig = field(default_factory=GroqConfig)
+    openrouter: OpenRouterConfig = field(default_factory=OpenRouterConfig)
     claude: ClaudeConfig = field(default_factory=ClaudeConfig)
 
 
@@ -47,10 +57,17 @@ def _path(value: str) -> Path:
 
 
 def _llm(raw: dict) -> LlmConfig:
-    d, g, c = LlmConfig(), GroqConfig(), ClaudeConfig()
-    gr, cr = raw.get("groq", {}), raw.get("claude", {})
+    d, g, c, o = LlmConfig(), GroqConfig(), ClaudeConfig(), OpenRouterConfig()
+    gr, cr, orr = raw.get("groq", {}), raw.get("claude", {}), raw.get("openrouter", {})
     return LlmConfig(
         backend=raw.get("backend", d.backend),
+        backup=raw.get("backup", d.backup),
+        openrouter=OpenRouterConfig(
+            fast_model=orr.get("fast_model", o.fast_model),
+            draft_model=orr.get("draft_model", o.draft_model),
+            reasoning_effort=orr.get("reasoning_effort", o.reasoning_effort),
+            zdr=bool(orr.get("zdr", o.zdr)),
+        ),
         timeout_s=float(raw.get("timeout_s", d.timeout_s)),
         groq=GroqConfig(
             fast_model=gr.get("fast_model", g.fast_model),

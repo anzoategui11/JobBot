@@ -9,7 +9,7 @@ from pathlib import Path
 
 from playwright.async_api import Frame
 
-from .fields import Extraction
+from .fields import Extraction, evaluate
 from .model import FormField
 
 
@@ -22,7 +22,7 @@ async def values(ex: Extraction, ids: list[str]) -> dict[str, str | None]:
             per_frame.setdefault(frame, []).append(fid)
     for frame, fids in per_frame.items():
         try:
-            out.update(await frame.evaluate("ids => window.__jobbotValues(ids)", fids))
+            out.update(await evaluate(frame, "ids => window.__jobbotValues(ids)", fids, timeout=5))
         except Exception:
             out.update({fid: None for fid in fids})
     return out
@@ -44,7 +44,9 @@ async def apply(ex: Extraction, fills: dict[str, str], if_empty: bool = False,
     out: dict[str, str] = {}
     for frame, items in per_frame.items():
         try:
-            got = await frame.evaluate("items => window.__jobbotFill(items)", items)
+            # dropdowns wait up to 1.5 s each for their list; allow for a long form
+            got = await evaluate(frame, "items => window.__jobbotFill(items)", items,
+                                 timeout=10 + 2 * len(items))
             for fid, s in got.items():
                 if isinstance(s, dict):              # dropdown opened but nothing matched: its options
                     if choices is not None:
@@ -67,7 +69,7 @@ async def fill_passwords(ex: Extraction, ids: list[str], password: str) -> tuple
     for frame, fids in per_frame.items():
         items = [{"id": fid, "kind": "password", "value": password, "ifEmpty": True} for fid in fids]
         try:
-            got = await frame.evaluate("items => window.__jobbotFill(items)", items)
+            got = await evaluate(frame, "items => window.__jobbotFill(items)", items, timeout=10)
             filled += sum(1 for s in got.values() if s == "ok")
         except Exception:
             continue
@@ -75,7 +77,7 @@ async def fill_passwords(ex: Extraction, ids: list[str], password: str) -> tuple
         await asyncio.sleep(0.7)                         # let the site run its live password-rule checks
         for frame, fids in per_frame.items():
             try:
-                flagged = flagged or bool(await frame.evaluate("ids => window.__jobbotPwCheck(ids)", fids))
+                flagged = flagged or bool(await evaluate(frame, "ids => window.__jobbotPwCheck(ids)", fids, timeout=5))
             except Exception:
                 pass
     return filled, flagged
@@ -87,7 +89,7 @@ async def attach_cv(ex: Extraction, f: FormField, cv: Path) -> str:
         return f"CV not found: {cv}"
     frame = ex.frame_of[f.id]
     try:
-        if await frame.evaluate("n => window.__jobbotPageHas(n)", cv.stem):
+        if await evaluate(frame, "n => window.__jobbotPageHas(n)", cv.stem, timeout=5):
             return "already attached"
         await frame.locator(f'[data-jobbot-id="{f.id}"]').first.set_input_files(str(cv), timeout=5000)
         return "ok"

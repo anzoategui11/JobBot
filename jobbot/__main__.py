@@ -1,16 +1,23 @@
 import argparse
 import asyncio
+import sys
 
 from . import config
 
 
 def main() -> None:
+    # A console that can't show a character (AI text, accents in company names) must never crash JobBot.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     ap = argparse.ArgumentParser(prog="jobbot")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("run", help="start/attach Brave and listen for Ctrl+Alt+G")
     sub.add_parser("make-shortcut", help="create the JobBot desktop shortcut")
-    sub.add_parser("llm-selftest", help="check the AI backend works and is locked down")
+    st = sub.add_parser("llm-selftest", help="check the AI backend works and is locked down")
+    st.add_argument("--backup", action="store_true", help="check the backup backend (OpenRouter) instead")
     sub.add_parser("set-groq-key", help="store your GroqCloud API key in Windows Credential Manager")
+    sub.add_parser("set-openrouter-key", help="store an OpenRouter API key (automatic backup when Groq is out)")
     sub.add_parser("set-password", help="store your job-hunting password in Windows Credential Manager")
     sp = sub.add_parser("seed-profile", help="draft profile.md from your CV (never overwrites it)")
     sp.add_argument("--force", action="store_true", help="write profile.md even if it exists")
@@ -29,7 +36,7 @@ def main() -> None:
         print(f"Created {make_shortcut(cfg)}")
     elif args.cmd == "llm-selftest":
         from .llm.selftest import run_selftest
-        raise SystemExit(0 if asyncio.run(run_selftest(cfg)) else 1)
+        raise SystemExit(0 if asyncio.run(run_selftest(cfg, backup=args.backup)) else 1)
     elif args.cmd == "set-groq-key":
         import getpass
         from .llm.groq import set_api_key
@@ -40,6 +47,16 @@ def main() -> None:
             raise SystemExit("Nothing saved.")
         set_api_key(key)
         print("Saved to Windows Credential Manager (JobBot / groq-api-key).")
+    elif args.cmd == "set-openrouter-key":
+        import getpass
+        from .llm.openrouter import set_api_key
+        key = getpass.getpass("Paste your OpenRouter API key (input is hidden), then press Enter: ").strip()
+        if not key:
+            raise SystemExit("Nothing entered. Nothing saved.")
+        if not key.startswith("sk-or-") and input("OpenRouter keys usually start with sk-or-. Save anyway? [y/N] ").lower() != "y":
+            raise SystemExit("Nothing saved.")
+        set_api_key(key)
+        print("Saved to Windows Credential Manager (JobBot / openrouter-api-key). It's used only when Groq fails.")
     elif args.cmd == "set-password":
         from .vault import set_interactive
         set_interactive()

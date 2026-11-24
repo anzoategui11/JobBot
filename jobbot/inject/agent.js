@@ -2,7 +2,11 @@
 // Written as one expression (IIFE) so it works both as an init script and via frame.evaluate().
 // No innerHTML anywhere: some sites enforce Trusted Types.
 (() => {
-  const VERSION = 9;                       // bump when this file changes: tabs with an older copy get this one
+  // Never run inside security-check frames (Cloudflare, reCAPTCHA, hCaptcha, Arkose): not ours to touch.
+  const h = location.hostname;
+  if (/(^|\.)(challenges\.cloudflare\.com|hcaptcha\.com|recaptcha\.net|arkoselabs\.com|funcaptcha\.com)$/.test(h) ||
+      /(^|\.)(google|gstatic)\.com$/.test(h) && location.pathname.startsWith("/recaptcha")) return;
+  const VERSION = 11;                      // bump when this file changes: tabs with an older copy get this one
   if ((window.__jobbotLoaded || 0) >= VERSION) return;
   window.__jobbotLoaded = VERSION;
   const me = {};
@@ -470,7 +474,9 @@
     li { margin: 2px 0; }
     .notes { font-size: 12px; color: #777; }
     .conflict { margin: 0 0 10px; }
-    .logbar { margin: 12px 0 4px; }
+    .logbar { margin: 0 0 10px; }
+    .warning { margin: 0 0 10px; padding: 8px 10px; border-radius: 8px; font-weight: 600;
+               background: #fdecea; color: #8a1c12; border: 1px solid #f5c2bd; }
     .learn { font-size: 13px; margin: 3px 0; align-items: flex-start; }
     .rolebar { display: flex; gap: 8px; align-items: center; font-weight: 500; margin: 0 0 10px; }
     .rolebar select { flex: 1; padding: 4px 6px; font: inherit; border: 1px solid #bbb; border-radius: 6px;
@@ -485,6 +491,7 @@
       button.small { color: #6cb4ff; border-color: #6cb4ff; }
       .rolebar select { background: #2a2a2a; border-color: #555; }
       .badge { background: #4a3d10; color: #ffd866; }
+      .warning { background: #4a1d1a; color: #ffb4ab; border-color: #7a2e27; }
     }`;
 
   let host = null, body = null;
@@ -574,7 +581,13 @@
         }
         parts.push(el("label", { class: "rolebar" }, document.createTextNode("Role "), sel));
       }
+      if (spec.warning) parts.push(el("div", { class: "warning", text: "⚠ " + spec.warning }));
       parts.push(el("p", { class: "status", text: spec.status || "" }));
+      if (spec.can_log && !spec.log_form) {
+        const btn = el("button", { class: "small logbtn", text: "Log as applied" });
+        btn.addEventListener("click", () => { btn.disabled = true; send({ type: "log_form" }); });
+        parts.push(el("div", { class: "logbar" }, btn));
+      }
       if (spec.drafts && spec.drafts.length) {
         parts.push(el("h4", { text: "AI drafts – review before submitting" }),
                    el("ul", {}, ...spec.drafts.map((d) => el("li", {},
@@ -644,10 +657,6 @@
           send({ type: "log", row });
         });
         parts.push(form, save);
-      } else if (spec.can_log) {
-        const btn = el("button", { class: "small logbtn", text: "Log as applied" });
-        btn.addEventListener("click", () => { btn.disabled = true; send({ type: "log_form" }); });
-        parts.push(el("div", { class: "logbar" }, btn));
       }
       if (spec.notes && spec.notes.length) {
         parts.push(el("h4", { text: "Details" }),

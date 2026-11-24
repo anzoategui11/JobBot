@@ -1,6 +1,8 @@
 """Collect form-field descriptors and job context from every frame of a page (via agent.js)."""
 
+import asyncio
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 from playwright.async_api import Frame, Page
 
@@ -37,12 +39,33 @@ def _field(d: dict) -> FormField | None:
     )
 
 
+# Security-check frames (Cloudflare, reCAPTCHA, hCaptcha, Arkose) are never read, injected into or waited on.
+CHALLENGE_HOSTS = ("challenges.cloudflare.com", "hcaptcha.com", "recaptcha.net", "arkoselabs.com",
+                   "funcaptcha.com")
+CHALLENGE_PATHS = ("google.com/recaptcha", "gstatic.com/recaptcha")
+
+
+def is_challenge(url: str) -> bool:
+    low = (url or "").lower()
+    host = urlsplit(low).hostname or ""
+    return any(host == h or host.endswith("." + h) for h in CHALLENGE_HOSTS) or \
+        any(p in low for p in CHALLENGE_PATHS)
+
+
+async def evaluate(target, expression: str, arg=None, timeout: float = 10.0):
+    """frame/page.evaluate that gives up instead of hanging (a frozen or half-loaded frame never answers)."""
+    coro = target.evaluate(expression) if arg is None else target.evaluate(expression, arg)
+    return await asyncio.wait_for(coro, timeout)
+
+
 async def _frame_data(frame: Frame, script: str) -> dict:
+    if is_challenge(frame.url):
+        return {"ok": False, "error": "security check frame (skipped)", "fields": [], "url": frame.url}
     try:
-        if not await frame.evaluate("typeof window.__jobbotFill === 'function'"):
-            await frame.evaluate(script)          # frame created before attach / init script missed it
-        return await frame.evaluate("n => window.__jobbotExtract(n)", JOB_CHARS)
-    except Exception as e:                        # detached, navigating, or a blank frame
+        if not await evaluate(frame, "typeof window.__jobbotFill === 'function'", timeout=3):
+            await evaluate(frame, script, timeout=5)   # frame created before attach / init script missed it
+        return await evaluate(frame, "n => window.__jobbotExtract(n)", JOB_CHARS, timeout=8)
+    except Exception as e:                        # detached, navigating, frozen, or a blank frame
         return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:120]}", "fields": [], "url": frame.url}
 
 

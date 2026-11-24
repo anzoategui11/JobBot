@@ -437,3 +437,83 @@ def test_password_rules_rejected_and_missing_password(tmp_path):
         await b.close()
         await p.stop()
     asyncio.run(go())
+
+
+async def _with_bad_frames(ctx):
+    async def turnstile(route):
+        await route.fulfill(status=200, content_type="text/html",
+                            body="<html><body><input id='cf' aria-label='Verify you are human'></body></html>")
+
+    async def frozen(route):   # a cross-origin frame whose script never yields: it never answers evaluate()
+        await route.fulfill(status=200, content_type="text/html", body=(
+            "<html><body><input aria-label='Frozen'>"
+            "<script>setTimeout(() => { for (;;) {} }, 50)</script></body></html>"))
+    await ctx.route("https://challenges.cloudflare.com/**", turnstile)
+    await ctx.route("https://frozen.test/**", frozen)
+
+
+def test_security_frames_untouched_and_frozen_frames_dont_lock_the_panel(tmp_path):
+    async def go():
+        p, b, page, session, backend, prof = await _open(tmp_path, "about:blank")
+        await _with_bad_frames(page.context)
+        await page.goto("https://jobbot.test/challenge.html")
+        await asyncio.sleep(0.3)
+        cf = next(f for f in page.frames if "cloudflare" in f.url)
+        assert await cf.evaluate("typeof window.__jobbotLoaded") == "undefined"     # agent stays out
+        t0 = asyncio.get_running_loop().time()
+        await session.handle({"page": page}, {"type": "hotkey"})
+        assert asyncio.get_running_loop().time() - t0 < 20                          # gave up on the frozen frame
+        assert await page.input_value("#fn") == "Jane"
+        st = session.states[page]
+        assert {f.label for f in st.ex.fields} == {"First name", "Expected salary"}   # nothing from either frame
+        text = await page.evaluate("document.querySelector('[data-jobbot-ui]').shadowRoot.textContent")
+        assert "Log as applied" in text
+        assert text.index("Log as applied") < text.index("Needs your answer")        # visible without scrolling
+        await b.close()
+        await p.stop()
+    asyncio.run(go())
+
+
+def test_log_works_while_a_fill_is_still_running(tmp_path):
+    class Slow(StubBackend):
+        async def map_fields(self, req):
+            await asyncio.sleep(3)
+            return await super().map_fields(req)
+
+    async def go():
+        p, b, page, session, backend, prof = await _open(tmp_path)
+        session.backend = Slow()
+        hot = asyncio.create_task(session.handle({"page": page}, {"type": "hotkey"}))
+        await asyncio.sleep(0.8)                                   # fill is waiting on the AI
+        await session.handle({"page": page}, {"type": "log_form"})
+        assert session.states[page].spec["log_form"]["company"] == "Initech"
+        assert not hot.done()
+        await hot
+        await session.handle({"page": page}, {"type": "hotkey"})   # busy lock was released by the first hotkey
+        assert session.states[page].spec["status"]
+        await b.close()
+        await p.stop()
+    asyncio.run(go())
+
+
+def test_hotkey_warns_when_already_applied(tmp_path):
+    async def go():
+        p, b, page, session, backend, prof = await _open(tmp_path)
+        await session.handle({"page": page}, {"type": "hotkey"})
+        assert not session.states[page].spec["warning"]
+        await session.handle({"page": page}, {"type": "log_form"})
+        await session.handle({"page": page}, {"type": "log", "row": session.states[page].spec["log_form"]})
+
+        # another day, a fresh JobBot, the same form
+        later = Session(prof, tmp_path / "Jane Doe - ML.pdf", StubBackend(), SCRIPT, state_path=tmp_path / "s2.json",
+                        log_path=tmp_path / "applications.csv", pending_path=tmp_path / "pending.csv",
+                        get_password=lambda: None)
+        await page.reload()
+        await later.handle({"page": page}, {"type": "hotkey"})
+        warning = later.states[page].spec["warning"]
+        assert warning.startswith("You already applied here on") and "Initech" in warning
+        panel = await page.evaluate("document.querySelector('[data-jobbot-ui]').shadowRoot.textContent")
+        assert "You already applied here" in panel
+        await b.close()
+        await p.stop()
+    asyncio.run(go())

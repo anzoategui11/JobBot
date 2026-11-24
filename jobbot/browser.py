@@ -18,7 +18,8 @@ BINDING = "__jobbot"
 
 
 async def show_panel(page: Page, text: str) -> None:
-    await page.main_frame.evaluate("t => window.__jobbotPanel && window.__jobbotPanel.show(t)", text)
+    await fields.evaluate(page.main_frame, "t => window.__jobbotPanel && window.__jobbotPanel.show(t)", text,
+                          timeout=5)
 
 
 def estimate_tokens(ex: fields.Extraction, profile_md: str) -> int:
@@ -30,8 +31,10 @@ def estimate_tokens(ex: fields.Extraction, profile_md: str) -> int:
 async def inject_existing(page: Page, script: str) -> None:
     """Init scripts only reach new documents; run the agent in tabs that were already open."""
     for frame in page.frames:
+        if fields.is_challenge(frame.url):
+            continue                              # never touch Cloudflare / CAPTCHA frames
         try:
-            await frame.evaluate(script)
+            await fields.evaluate(frame, script, timeout=5)
         except Exception as e:  # detached/navigating frames are expected
             print(f"[inject skipped] {frame.url[:80]}: {type(e).__name__}", flush=True)
 
