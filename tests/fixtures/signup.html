@@ -1,0 +1,18 @@
+<!doctype html><html><head><title>Create Account - Acme Careers</title></head><body>
+<h2>Create Account</h2>
+<form onsubmit="window.__submitted = true; return false">
+  <label for="em">Email Address</label><input id="em" type="email">
+  <label for="pw">Password</label><input id="pw" type="password" autocomplete="new-password">
+  <label for="pw2">Verify New Password</label><input id="pw2" type="password">
+  <div class="msg"></div>
+  <label><input type="checkbox" id="agree"> I agree to the Terms and Conditions</label>
+  <button type="submit" id="create" onclick="window.__clicked = true">Create Account</button>
+</form>
+<script>
+  // Live rule check like many ATSs: needs a digit.
+  document.querySelector("#pw").addEventListener("input", (e) => {
+    const box = document.querySelector(".msg");
+    box.className = /\d/.test(e.target.value) ? "msg" : "msg error";
+    box.textContent = /\d/.test(e.target.value) ? "" : "Password must contain a number";
+  });
+</script></body></html>

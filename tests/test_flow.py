@@ -95,7 +95,8 @@ async def _open(tmp_path, start="https://jobbot.test/apply.html"):
     prof.write_text(PROFILE.replace("{cv}", str(cv)), encoding="utf-8")
     backend = StubBackend(delay=0.3)
     session = Session(prof, cv, backend, SCRIPT, state_path=tmp_path / "state.json",
-                      log_path=tmp_path / "applications.csv", pending_path=tmp_path / "pending.csv")
+                      log_path=tmp_path / "applications.csv", pending_path=tmp_path / "pending.csv",
+                      get_password=lambda: None)
     ctx.on("page", session.provenance.track)
     await ctx.expose_binding(jb.BINDING, session.handle)
     page = await ctx.new_page()
@@ -382,6 +383,57 @@ def test_workday_dropdowns_resume_and_second_pass(tmp_path):
         assert q4["options"] == [] and q4["kind"] == "combobox"
         assert await page.evaluate("document.querySelector('[data-ui=resume]').files.length") == 1
         assert await page.evaluate("document.querySelector('[data-ui=cover_letter]').files.length") == 0
+        await b.close()
+        await p.stop()
+    asyncio.run(go())
+
+
+SECRET = "S3cret-pw!x"
+
+
+def test_signup_page_fills_password_locally_and_never_leaks_it(tmp_path, capsys):
+    async def go():
+        p, b, page, session, backend, prof = await _open(tmp_path, "https://jobbot.test/signup.html")
+        session.get_password = lambda: SECRET
+        await session.handle({"page": page}, {"type": "hotkey"})
+        assert await page.input_value("#em") == "jane@example.com"
+        assert await page.input_value("#pw") == SECRET and await page.input_value("#pw2") == SECRET
+        assert not await page.is_checked("#agree")                               # terms: yours
+        assert not await page.evaluate("!!window.__clicked || !!window.__submitted")   # never creates the account
+        st = session.states[page]
+        assert "sign-up: password + confirmation filled" in st.spec["status"]
+        assert not any("rules" in m for m in st.spec["manual"])
+        await session.handle({"page": page}, {"type": "log_form"})
+        await session.handle({"page": page}, {"type": "log", "row": st.spec["log_form"]})
+        everything = " ".join([repr(st.spec), repr(st.filled), repr(st.edits), repr(st.learn),
+                               repr(backend.requests), prof.read_text(encoding="utf-8"),
+                               (tmp_path / "applications.csv").read_text(encoding="utf-8")])
+        assert SECRET not in everything
+        assert all(f.kind != "password" for r in backend.requests for f in r.fields)
+        panel = await page.evaluate("document.querySelector('[data-jobbot-ui]').shadowRoot.textContent")
+        assert SECRET not in panel
+
+        # second press: the boxes already hold a password, so they're left alone
+        await session.handle({"page": page}, {"type": "hotkey"})
+        assert "password" not in session.states[page].spec["status"]
+        await b.close()
+        await p.stop()
+    asyncio.run(go())
+    out = capsys.readouterr()
+    assert SECRET not in out.out and SECRET not in out.err
+
+
+def test_password_rules_rejected_and_missing_password(tmp_path):
+    async def go():
+        p, b, page, session, backend, prof = await _open(tmp_path, "https://jobbot.test/signup.html")
+        session.get_password = lambda: "nodigits"
+        await session.handle({"page": page}, {"type": "hotkey"})
+        assert any("password's rules" in m for m in session.states[page].spec["manual"])
+        await page.reload()
+        session.get_password = lambda: None
+        await session.handle({"page": page}, {"type": "hotkey"})
+        assert await page.input_value("#pw") == ""
+        assert any("set-password" in m for m in session.states[page].spec["manual"])
         await b.close()
         await p.stop()
     asyncio.run(go())

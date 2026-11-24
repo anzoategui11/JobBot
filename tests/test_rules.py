@@ -65,7 +65,8 @@ def test_plan_routes_fields():
     assert [f.label for f in plan.salary] == ["Expected salary"]
     assert [f.label for f in plan.consent] == ["I accept the privacy policy"]
     assert [f.label for f in plan.cv] == ["Resume"]
-    assert {f.label for f in plan.skipped} == {"Password", "Phone"}
+    assert {f.label for f in plan.skipped} == {"Phone"}
+    assert [f.label for f in plan.passwords] == ["Password"]              # filled locally, never AI
     assert [f.label for f in plan.llm] == ["Do you need sponsorship?", "AI Engineer"]  # Roles isn't an answer
 
 
@@ -125,3 +126,12 @@ def test_province_opt_out_and_resume_hint():
     upload = F("Upload a file or drag and drop here", "file", hint="resume")
     cover = F("Upload a file", "file", hint="cover_letter")
     assert rules.is_cv_input(upload, [upload, cover]) and not rules.is_cv_input(cover, [upload, cover])
+
+
+def test_page_kind():
+    login = [F("Email", "email"), F("Password", "password")]
+    assert rules.page_kind(login) == "login"
+    assert rules.page_kind(login + [F("Verify password", "password")]) == "signup"
+    assert rules.page_kind([F("Password", "password", autocomplete="new-password")]) == "signup"
+    assert rules.page_kind([F("Email", "email")]) == ""
+    assert rules.plan([F("Email or username", "text")], PROF).local == {"Email or username": "jane@example.com"}

@@ -19,6 +19,7 @@ from . import applog, fields, filler, profile, rules
 from .llm import prompts
 from .provenance import Provenance
 from . import state as saved_state
+from . import vault
 from .llm.base import Backend, LLMError
 from .model import CHOICE_KINDS, DraftBatch, DraftQuestion, FormField, JobInfo, MapRequest
 
@@ -73,10 +74,11 @@ async def show_text(page: Page, text: str) -> None:
 class Session:
     def __init__(self, profile_path: Path, cv_path: Path, backend: Backend, script: str,
                  state_path: Path = saved_state.DEFAULT, log_path: Path | None = None,
-                 pending_path: Path = applog.PENDING):
+                 pending_path: Path = applog.PENDING, get_password=vault.get):
         self.profile_path, self.cv_path, self.backend, self.script = profile_path, cv_path, backend, script
         self.log_path = log_path or profile_path.parent / "applications.csv"
         self.pending_path = pending_path
+        self.get_password = get_password          # Credential Manager lookup (swappable in tests)
         self.provenance = Provenance()
         self.state_path = state_path
         self.saved = saved_state.load(state_path)
@@ -221,6 +223,23 @@ class Session:
                 notes.append(f"CV upload: {s}")
                 manual.append(f"Attach your CV yourself: {f.label or 'file upload'}")
 
+        pw_note = ""
+        if plan.passwords:
+            kind = rules.page_kind(ex.fields)
+            password = self.get_password()
+            if not password:
+                manual.append("Password: store it once with  uv run python -m jobbot set-password  "
+                              "(in the JobBot folder), then press Ctrl+Alt+G again.")
+            else:
+                n, flagged = await filler.fill_passwords(ex, [f.id for f in plan.passwords], password)
+                del password
+                if n:
+                    pw_note = (" · sign-up: password + confirmation filled" if kind == "signup" and n > 1
+                               else " · password filled")
+                    notes.append("Brave may offer to save the password: that's fine.")
+                if flagged:
+                    manual.append("The site doesn't accept your password's rules: choose one yourself here.")
+
         for fid, q in unknown.items():
             f = by_id[fid]
             questions.append((f, "", q if rules.norm_label(q) != rules.norm_label(f.label) else ""))
@@ -231,7 +250,7 @@ class Session:
 
         secs = time.perf_counter() - t0
         timing = f" in {secs:.1f} s" + (f" (AI {llm_secs:.1f} s)" if llm_secs is not None else "")
-        head = f"Filled {ok} field{'s' if ok != 1 else ''}{timing}{cv_note}." if ok or cv_note else \
+        head = f"Filled {ok} field{'s' if ok != 1 else ''}{timing}{cv_note}{pw_note}." if ok or cv_note or pw_note else \
             ("Nothing to fill on this page." if not (questions or plan.free_text) else f"Checked the form{timing}.")
         if "dialog" in ex.headings:
             head += f"\nForm: {ex.headings['dialog']}"

@@ -2,7 +2,7 @@
 // Written as one expression (IIFE) so it works both as an init script and via frame.evaluate().
 // No innerHTML anywhere: some sites enforce Trusted Types.
 (() => {
-  const VERSION = 8;                       // bump when this file changes: tabs with an older copy get this one
+  const VERSION = 9;                       // bump when this file changes: tabs with an older copy get this one
   if ((window.__jobbotLoaded || 0) >= VERSION) return;
   window.__jobbotLoaded = VERSION;
   const me = {};
@@ -413,6 +413,23 @@
     }
     try { if (active && active.focus) active.focus({ preventScroll: true }); } catch {}
     return out;
+  };
+
+  // After a password is filled: does the site flag it (invalid state or an error message next to the box)?
+  // Returns true/false only; the password itself never leaves the field.
+  const PW_ERROR = /password|contrase[nñ]a|clave|characters|caracteres|uppercase|may[uú]scula|special|especial|symbol|s[ií]mbolo/i;
+  window.__jobbotPwCheck = (ids) => {
+    for (const id of ids) {
+      const el = elementsFor(id)[0];
+      if (!el) continue;
+      if (el.getAttribute("aria-invalid") === "true" || (el.validity && !el.validity.valid)) return true;
+      let box = el.parentElement;
+      for (let d = 0; box && d < 3; d++, box = box.parentElement) {
+        const errs = box.querySelectorAll('[role="alert"],[aria-live="assertive"],[class*="error" i],[class*="invalid" i]');
+        for (const e of errs) if (visible(e) && PW_ERROR.test(textOf(e))) return true;
+      }
+    }
+    return false;
   };
 
   window.__jobbotPageHas = (needle) => {

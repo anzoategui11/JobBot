@@ -35,6 +35,9 @@ SYNONYMS = {
     "last name": "Last name", "surname": "Last name", "family name": "Last name", "apellido": "Last name",
     "apellidos": "Last name",
     "email": "Email", "email address": "Email", "e mail": "Email", "correo": "Email",
+    "username": "Email", "user name": "Email", "email or username": "Email", "username or email": "Email",
+    "email address or username": "Email", "usuario": "Email", "correo o usuario": "Email",
+    "sign in email": "Email", "login": "Email",
     "correo electronico": "Email", "correo electrónico": "Email",
     "phone": "Phone", "phone number": "Phone", "mobile": "Phone", "mobile phone": "Phone",
     "mobile phone number": "Phone", "telefono": "Phone", "teléfono": "Phone", "celular": "Phone",
@@ -160,7 +163,21 @@ class Plan:
     consent: list[FormField] = field(default_factory=list)        # you tick these yourself
     free_text: list[FormField] = field(default_factory=list)      # drafts come in Stage 6; asked for now
     cv: list[FormField] = field(default_factory=list)             # upload the CV here
-    skipped: list[FormField] = field(default_factory=list)        # already has a value / password / other file
+    skipped: list[FormField] = field(default_factory=list)        # already has a value / other file
+    passwords: list[FormField] = field(default_factory=list)      # empty password boxes: filled locally from the vault
+
+
+CONFIRM_PW = re.compile(r"confirm|verify|repeat|re.?enter|again|confirmar|repet|verific", re.I)
+
+
+def page_kind(fields: list[FormField]) -> str:
+    """'signup' (create a password), 'login' (enter it), or '' (no password on this page). Local, no AI."""
+    pw = [f for f in fields if f.kind == "password"]
+    if not pw:
+        return ""
+    if len(pw) >= 2 or any("new-password" in f.autocomplete for f in pw) or any(CONFIRM_PW.search(f.label) for f in pw):
+        return "signup"
+    return "login"
 
 
 def plan(fields: list[FormField], p: Profile) -> Plan:
@@ -169,7 +186,9 @@ def plan(fields: list[FormField], p: Profile) -> Plan:
     for f in fields:
         if f.kind == "file":
             (out.cv if is_cv_input(f, fields) and not f.current_value else out.skipped).append(f)
-        elif f.kind == "password" or has_value(f):
+        elif f.kind == "password":
+            (out.skipped if f.current_value else out.passwords).append(f)
+        elif has_value(f):
             out.skipped.append(f)
         elif is_salary(f):
             out.salary.append(f)

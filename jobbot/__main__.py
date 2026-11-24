@@ -11,6 +11,7 @@ def main() -> None:
     sub.add_parser("make-shortcut", help="create the JobBot desktop shortcut")
     sub.add_parser("llm-selftest", help="check the AI backend works and is locked down")
     sub.add_parser("set-groq-key", help="store your GroqCloud API key in Windows Credential Manager")
+    sub.add_parser("set-password", help="store your job-hunting password in Windows Credential Manager")
     sp = sub.add_parser("seed-profile", help="draft profile.md from your CV (never overwrites it)")
     sp.add_argument("--force", action="store_true", help="write profile.md even if it exists")
     sub.add_parser("profile-check", help="show which profile.md facts are still blank")
@@ -39,6 +40,9 @@ def main() -> None:
             raise SystemExit("Nothing saved.")
         set_api_key(key)
         print("Saved to Windows Credential Manager (JobBot / groq-api-key).")
+    elif args.cmd == "set-password":
+        from .vault import set_interactive
+        set_interactive()
     elif args.cmd == "seed-profile":
         from .llm import get_backend
         from .seed import seed

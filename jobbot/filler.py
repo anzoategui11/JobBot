@@ -4,6 +4,7 @@ Only elements tagged data-jobbot-id by the extractor are touched. Nothing here c
 submits, navigates or scrolls.
 """
 
+import asyncio
 from pathlib import Path
 
 from playwright.async_api import Frame
@@ -53,6 +54,31 @@ async def apply(ex: Extraction, fills: dict[str, str], if_empty: bool = False,
         except Exception as e:                       # frame navigated away mid-fill
             out.update({i["id"]: f"error: {type(e).__name__}" for i in items})
     return out
+
+
+async def fill_passwords(ex: Extraction, ids: list[str], password: str) -> tuple[int, bool]:
+    """Put your password into these password boxes. Returns (how many filled, did the site flag it).
+    The password is passed straight to the page; nothing here prints, returns or stores it."""
+    per_frame: dict[Frame, list[str]] = {}
+    for fid in ids:
+        if (frame := ex.frame_of.get(fid)) is not None:
+            per_frame.setdefault(frame, []).append(fid)
+    filled, flagged = 0, False
+    for frame, fids in per_frame.items():
+        items = [{"id": fid, "kind": "password", "value": password, "ifEmpty": True} for fid in fids]
+        try:
+            got = await frame.evaluate("items => window.__jobbotFill(items)", items)
+            filled += sum(1 for s in got.values() if s == "ok")
+        except Exception:
+            continue
+    if filled:
+        await asyncio.sleep(0.7)                         # let the site run its live password-rule checks
+        for frame, fids in per_frame.items():
+            try:
+                flagged = flagged or bool(await frame.evaluate("ids => window.__jobbotPwCheck(ids)", fids))
+            except Exception:
+                pass
+    return filled, flagged
 
 
 async def attach_cv(ex: Extraction, f: FormField, cv: Path) -> str:
