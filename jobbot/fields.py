@@ -33,6 +33,7 @@ def _field(d: dict) -> FormField | None:
         required=bool(d.get("required")),
         current_value="" if kind == "password" else str(d.get("current_value") or "")[:300],
         autocomplete=str(d.get("autocomplete") or "")[:40], accept=str(d.get("accept") or "")[:100],
+        hint=str(d.get("hint") or "")[:120],
     )
 
 

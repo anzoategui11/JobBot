@@ -4,16 +4,20 @@ hotkey  -> extract fields -> local rules -> LLM for the rest -> fill -> attach C
           -> (background) AI drafts for open questions -> fill empty ones -> panel badges them
 answers -> fill your answers -> save the ticked ones to profile.md -> conflicts shown for confirmation
 role    -> remembered; unedited drafts are redrafted for the new role
+log     -> form prefilled (portal from tab history, company/position from the posting) -> applications.csv
+        -> fields you edited or typed yourself are offered for saving to profile.md
 """
 
 import asyncio
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from playwright.async_api import Page
 
-from . import fields, filler, profile, rules
+from . import applog, fields, filler, profile, rules
+from .llm import prompts
+from .provenance import Provenance
 from . import state as saved_state
 from .llm.base import Backend, LLMError
 from .model import CHOICE_KINDS, DraftBatch, DraftQuestion, FormField, JobInfo, MapRequest
@@ -42,6 +46,14 @@ class TabState:
     drafts: dict[str, str] = field(default_factory=dict)        # field id -> AI draft written (not saved)
     gen: int = 0                                                # bumps per hotkey; stale draft tasks don't repaint
     task: asyncio.Task | None = None                            # running draft job
+    original: dict[str, str] = field(default_factory=dict)      # field id -> value before JobBot touched the page
+    cv_used: str = ""
+    learn: dict[str, tuple[Question, str]] = field(default_factory=dict)   # lid -> (where to save, value)
+    logged: bool = False
+    known: dict[str, FormField] = field(default_factory=dict)  # every field seen in this tab (all steps)
+    edits: dict[str, str] = field(default_factory=dict)        # field id -> last value reported by the page
+    apply_url: str = ""                                         # where you first pressed the hotkey in this tab
+    salary: str = ""                                            # salary you gave in the panel for this application
 
 
 def _answer_value(f: FormField, value: str) -> str:
@@ -60,8 +72,12 @@ async def show_text(page: Page, text: str) -> None:
 
 class Session:
     def __init__(self, profile_path: Path, cv_path: Path, backend: Backend, script: str,
-                 state_path: Path = saved_state.DEFAULT):
+                 state_path: Path = saved_state.DEFAULT, log_path: Path | None = None,
+                 pending_path: Path = applog.PENDING):
         self.profile_path, self.cv_path, self.backend, self.script = profile_path, cv_path, backend, script
+        self.log_path = log_path or profile_path.parent / "applications.csv"
+        self.pending_path = pending_path
+        self.provenance = Provenance()
         self.state_path = state_path
         self.saved = saved_state.load(state_path)
         self.states: dict[Page, TabState] = {}
@@ -95,7 +111,12 @@ class Session:
     async def handle(self, source: dict, msg: dict) -> None:
         page: Page = source["page"]
         kind = msg.get("type") if isinstance(msg, dict) else None
-        if kind not in ("hotkey", "answers", "replace", "role") or page in self.busy:
+        if kind == "edit":                       # frequent and tiny: record, never block on busy
+            fid, value = str(msg.get("id", ""))[:40], msg.get("value")
+            if isinstance(value, str):
+                self.state(page).edits[fid] = value[:MAX_ANSWER]
+            return
+        if kind not in ("hotkey", "answers", "replace", "role", "log_form", "log", "learn") or page in self.busy:
             return
         self.busy.add(page)
         try:
@@ -105,6 +126,12 @@ class Session:
                 await self.on_answers(page, msg.get("answers"))
             elif kind == "role":
                 await self.on_role(page, str(msg.get("role", "")))
+            elif kind == "log_form":
+                await self.on_log_form(page)
+            elif kind == "log":
+                await self.on_log(page, msg.get("row"))
+            elif kind == "learn":
+                await self.on_learn(page, msg.get("ids"))
             else:
                 await self.on_replace(page, str(msg.get("cid", "")))
         except Exception as e:
@@ -125,6 +152,10 @@ class Session:
         ex = await fields.extract(page, self.script)
         st.ex, st.questions, st.conflicts = ex, {}, {}
         st.gen += 1
+        st.apply_url = st.apply_url or page.url
+        for f in ex.fields:
+            st.original.setdefault(f.id, f.current_value)
+            st.known[f.id] = f
         prof = self._profile()
         cv_path = self.cv_for(prof)
         plan = rules.plan(ex.fields, prof)
@@ -153,7 +184,10 @@ class Session:
                     unknown[f.id] = f.label
 
         by_id = {f.id: f for f in ex.fields}
-        status = await filler.apply(ex, fills)
+        choices: dict[str, list[str]] = {}
+        status = await filler.apply(ex, fills, choices=choices)
+        if choices:
+            status.update(await self._choose(ex, choices, fills, prof))
         ok = 0
         manual: list[str] = []
         questions: list[tuple[FormField, str, str]] = []     # (field, suggestion, hint)
@@ -167,6 +201,8 @@ class Session:
                 st.filled[fid] = v
             elif s == "manual":
                 manual.append(f"Choose “{v}” in: {f.label}")
+            elif s == "choose" and choices.get(fid):
+                questions.append((replace(f, options=choices[fid]), "", "Pick from the site's own list."))
             else:
                 questions.append((f, v, f"Couldn't fill it ({s}); check the value."))
 
@@ -177,6 +213,7 @@ class Session:
             s = await filler.attach_cv(ex, f, cv_path)
             if s == "ok":
                 st.cv_done.add(f.id)
+                st.cv_used = cv_path.name
                 cv_note = f" · CV attached ({cv_path.name})"
             elif s == "already attached":
                 cv_note = " · CV already on the page"
@@ -203,7 +240,7 @@ class Session:
         head += "\nReview everything, then submit yourself."
         st.spec = {"status": head, "questions": self._questions(st, questions, prof), "manual": manual,
                    "notes": notes, "roles": [r for r, _ in self.roles(prof)], "role": self.role(prof),
-                   "drafts": []}
+                   "drafts": [], "can_log": not st.logged}
         print(head.replace("\n", " | "), flush=True)
         await show(page, st.spec)
         if plan.free_text:
@@ -274,6 +311,27 @@ class Session:
         await show(page, st.spec)
         st.task = asyncio.create_task(self._draft(page, st, st.gen, untouched, prof, st.ex, redraft=True))
 
+    async def _choose(self, ex: fields.Extraction, choices: dict[str, list[str]], fills: dict[str, str],
+                      prof: profile.Profile) -> dict[str, str]:
+        """Dropdowns whose options only exist once opened (Workday): let the AI pick from the real list."""
+        by_id = {f.id: f for f in ex.fields}
+        asks = [replace(by_id[fid], kind="select", options=opts, current_value="")
+                for fid, opts in choices.items() if opts]
+        out = {fid: "choose" for fid in choices}
+        if not asks:
+            return out
+        try:
+            res = await self.backend.map_fields(MapRequest(asks, prof.text, ex.job_text, ex.url, ex.title))
+        except LLMError as e:
+            print(f"[choose] {e}", flush=True)
+            return out
+        picked = {fid: v for fid, v in res.fills.items() if fid in choices}
+        for fid, s in (await filler.apply(ex, picked)).items() if picked else ():
+            if s == "ok":
+                out[fid] = "ok"
+                fills[fid] = picked[fid]
+        return out
+
     def _questions(self, st: TabState, items: list[tuple[FormField, str, str]], prof: profile.Profile) -> list[dict]:
         out = []
         for f, suggestion, hint in items:
@@ -281,7 +339,8 @@ class Session:
             qid = f"q{st.seq}"
             section, key = rules.save_target(f, f.label, prof)
             st.questions[qid] = Question(qid, f, section, key)
-            options = f.options if f.kind in CHOICE_KINDS else (["Yes", "No"] if f.kind == "checkbox" else [])
+            options = f.options if (f.kind in CHOICE_KINDS or f.options) else \
+                (["Yes", "No"] if f.kind == "checkbox" else [])
             out.append({"qid": qid, "label": f.label or "(no label)", "kind": f.kind, "options": options,
                         "value": suggestion, "hint": hint, "save": True})
         return out
@@ -305,6 +364,8 @@ class Session:
                 continue
             fills[q.field.id] = _answer_value(q.field, value)
             answered.add(q.qid)
+            if rules.is_salary(q.field):
+                st.salary = value
             if a.get("save"):
                 saves.append((q, value))
 
@@ -312,6 +373,21 @@ class Session:
         filled = sum(1 for s in status.values() if s in ("ok", "typed"))
         st.filled.update({fid: v for fid, v in fills.items() if status.get(fid) in ("ok", "typed")})
 
+        saved, conflicts = self._save(st, saves)
+
+        remaining = [q for q in st.spec.get("questions", []) if q["qid"] not in answered]
+        failed = [st.questions[qid].field.label for qid in answered
+                  if status.get(st.questions[qid].field.id) not in ("ok", "typed")]
+        head = f"Filled {filled} answer{'s' if filled != 1 else ''}" + \
+            (f", saved {saved} to profile.md" if saved else "") + "."
+        if failed:
+            head += "\nCouldn't fill: " + "; ".join(failed)
+        head += "\nReview everything, then submit yourself."
+        st.spec = {**st.spec, "status": head, "questions": remaining, "conflicts": conflicts}
+        await show(page, st.spec)
+
+    def _save(self, st: TabState, saves: list[tuple[Question, str]]) -> tuple[int, list[dict]]:
+        """Write answers to profile.md. Returns (how many saved, conflicts to confirm in the panel)."""
         saved, conflicts = 0, []
         for q, value in saves:
             if q.section == profile.QA_SECTION:
@@ -329,17 +405,7 @@ class Session:
                                                       f"you typed “{value[:200]}”. Update profile.md?"})
             elif r in ("added", "filled"):
                 saved += 1
-
-        remaining = [q for q in st.spec.get("questions", []) if q["qid"] not in answered]
-        failed = [st.questions[qid].field.label for qid in answered
-                  if status.get(st.questions[qid].field.id) not in ("ok", "typed")]
-        head = f"Filled {filled} answer{'s' if filled != 1 else ''}" + \
-            (f", saved {saved} to profile.md" if saved else "") + "."
-        if failed:
-            head += "\nCouldn't fill: " + "; ".join(failed)
-        head += "\nReview everything, then submit yourself."
-        st.spec = {**st.spec, "status": head, "questions": remaining, "conflicts": conflicts}
-        await show(page, st.spec)
+        return saved, conflicts
 
     async def on_replace(self, page: Page, cid: str) -> None:
         st = self.state(page)
@@ -352,4 +418,113 @@ class Session:
             profile.replace(self.profile_path, section, key, value)
         st.spec = {**st.spec, "status": f"Updated “{key}” in profile.md.",
                    "conflicts": [c for c in st.spec.get("conflicts", []) if c["cid"] != cid]}
+        await show(page, st.spec)
+
+    # ------------------------------------------------------------------ log as applied
+    async def _job_info(self, page: Page, st: TabState) -> JobInfo:
+        """Company / position / location: from the fill step if the AI saw the posting, else a small extract call."""
+        job = st.job
+        if job.company and job.position:
+            return job
+        ex = st.ex
+        heads = ex.headings if ex else {}
+        try:
+            raw = await self.backend.extract(prompts.JOB_SYSTEM, prompts.job_prompt(
+                page.url, await page.title(), heads, ex.job_text if ex else ""), prompts.JOB_SCHEMA, "job_info")
+            got = JobInfo(*(prompts.clean_meta(raw.get(k, "")) for k in ("company", "position", "location")))
+        except LLMError as e:
+            print(f"[log] job info: {e}", flush=True)
+            got = JobInfo(heads.get("site", ""), heads.get("h1", "") or heads.get("og_title", ""), "")
+        st.job = JobInfo(job.company or got.company, job.position or got.position,
+                         job.location or got.location, job.language)
+        return st.job
+
+    async def on_log_form(self, page: Page) -> None:
+        st = self.state(page)
+        prof = self._profile()
+        await show_text(page, "Preparing the log entry…")
+        job = await self._job_info(page, st)
+        st.spec = {**st.spec, "status": "Check these details, then save.", "log_form": {
+            "portal": await self.provenance.portal(page, prof.portals()), "company": job.company,
+            "position": job.position, "link": applog.normalize_link(st.apply_url or page.url),
+            "location": job.location, "salary": await self._salary(st), "notes": ""}}
+        await show(page, st.spec)
+
+    async def _salary(self, st: TabState) -> str:
+        """The salary you gave for this application: panel answer, else what's in a salary field on the page."""
+        if st.salary:
+            return st.salary
+        sal = [f for f in st.known.values() if rules.is_salary(f)]
+        on_page = {f.id for f in st.ex.fields} if st.ex else set()
+        now = await filler.values(st.ex, [f.id for f in sal if f.id in on_page]) if st.ex and sal else {}
+        for f in sal:
+            v = now.get(f.id) or st.edits.get(f.id) or ""
+            if v.strip():
+                return v.strip()
+        return ""
+
+    async def on_log(self, page: Page, row) -> None:
+        st = self.state(page)
+        if not isinstance(row, dict):
+            return
+        prof = self._profile()
+        role = self.role(prof)
+        result, written = applog.log(self.log_path, {
+            "Portal": row.get("portal", ""), "Company": row.get("company", ""),
+            "Position": row.get("position", ""), "Application link": row.get("link", "") or page.url,
+            "CV used": st.cv_used or self.cv_for(prof).name, "Location": row.get("location", ""),
+            "Notes": row.get("notes", ""), "Role": role, "Expected salary": row.get("salary", "")},
+            self.pending_path)
+        if result == "added":
+            head = f"Logged ✓ {written['Company']} – {written['Position']} ({written['Portal']})."
+        elif result == "duplicate":
+            head = f"Already logged on {written.get('Date', '?')}: {written.get('Company', '')} – " \
+                   f"{written.get('Position', '')}. Nothing added."
+        else:
+            head = "applications.csv is open (Excel?). Saved to pending.csv; it's added automatically " \
+                   "next time you log or start JobBot."
+        st.logged = True
+        learn = await self._learn_candidates(st, prof)
+        st.spec = {**st.spec, "status": head, "log_form": None, "can_log": False, "learn": learn,
+                   "questions": [], "conflicts": []}
+        print(f"[log] {result}: {written.get('Application link')}", flush=True)
+        await show(page, st.spec)
+
+    async def _learn_candidates(self, st: TabState, prof: profile.Profile) -> list[dict]:
+        """Fields you filled or changed yourself (not drafts, salary, consent, passwords, files)."""
+        norm = lambda t: " ".join((t or "").split()).casefold()
+        todo = [f for f in st.known.values()
+                if f.kind not in ("password", "file", "checkbox") and f.id not in st.drafts
+                and not (rules.is_salary(f) or rules.is_consent(f) or rules.is_free_text(f))]
+        on_page = {f.id for f in st.ex.fields} if st.ex else set()
+        now = await filler.values(st.ex, [f.id for f in todo if f.id in on_page]) if st.ex else {}
+        st.learn = {}
+        out = []
+        for f in todo:
+            v = now.get(f.id)
+            v = (v if v is not None else st.edits.get(f.id, "")).strip()    # earlier steps: last reported edit
+            if not v:
+                continue
+            before = st.filled.get(f.id, st.original.get(f.id, ""))
+            if norm(v) == norm(before):
+                continue                                    # what JobBot (or the site) put there, unchanged
+            section, key = rules.save_target(f, f.label, prof)
+            existing = prof.get(section, key) if section != profile.QA_SECTION else prof.qa().get(key)
+            if existing and norm(existing) == norm(v):
+                continue
+            st.seq += 1
+            lid = f"l{st.seq}"
+            st.learn[lid] = (Question(lid, f, section, key), v[:MAX_ANSWER])
+            out.append({"lid": lid, "label": f.label or key, "value": v[:200]})
+        return out
+
+    async def on_learn(self, page: Page, ids) -> None:
+        st = self.state(page)
+        if not isinstance(ids, list):
+            return
+        saves = [st.learn.pop(str(i)) for i in ids[:100] if str(i) in st.learn]
+        saved, conflicts = self._save(st, saves)
+        st.spec = {**st.spec, "learn": [], "conflicts": conflicts,
+                   "status": st.spec.get("status", "").split("\n")[0] +
+                   f"\nSaved {saved} edit{'s' if saved != 1 else ''} to profile.md."}
         await show(page, st.spec)

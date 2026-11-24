@@ -17,6 +17,7 @@ class FormField:
     current_value: str = ""
     autocomplete: str = ""      # the page's autocomplete hint (e.g. "given-name"), a strong signal
     accept: str = ""            # file inputs only: accepted types, used to spot the CV upload
+    hint: str = ""              # name/id/data-* attributes (e.g. "resume"): never shown, helps classify
 
 
 @dataclass

@@ -17,7 +17,7 @@ SALARY = re.compile(
     r"\bctc\b|remunera|sueldo|pretensi[oó]n|\brenta\b|honorarios", re.I)
 CONSENT = re.compile(
     r"\b(agree|consent|acknowledge|certify|accept|confirm)\b|terms|privacy|policy|gdpr|"
-    r"acepto|consiento|t[ée]rminos|privacidad|declaro|confirmo", re.I)
+    r"acepto|consiento|t[ée]rminos|privacidad|declaro|confirmo|opt.?out|opt.?in", re.I)
 FREE_TEXT_START = re.compile(r"^\s*(describe|explain|tell us|why|what (makes|motivates|excites|interests)|"
                              r"how would you|cover letter|describ|cu[ée]ntanos|por qu[ée]|explica)", re.I)
 CV_LABEL = re.compile(r"resum|r[ée]sum[ée]|\bcv\b|curr[ií]cul", re.I)
@@ -38,13 +38,16 @@ SYNONYMS = {
     "correo electronico": "Email", "correo electrónico": "Email",
     "phone": "Phone", "phone number": "Phone", "mobile": "Phone", "mobile phone": "Phone",
     "mobile phone number": "Phone", "telefono": "Phone", "teléfono": "Phone", "celular": "Phone",
+    "province": "Province", "state": "Province", "provincia": "Province", "state province": "Province",
+    "state / province": "Province", "state or province": "Province", "province / state": "Province",
+    "province or state": "Province", "estado / provincia": "Province", "region": "Province",
     "city": "City", "ciudad": "City", "country": "Country", "pais": "Country", "país": "Country",
     "linkedin": "LinkedIn", "linkedin profile": "LinkedIn", "linkedin url": "LinkedIn",
     "linkedin profile url": "LinkedIn", "github": "GitHub", "github url": "GitHub", "github profile": "GitHub",
     "website": "Website", "portfolio": "Website", "personal website": "Website", "portfolio url": "Website",
 }
 AUTOCOMPLETE = {"given-name": "First name", "family-name": "Last name", "name": "__full__", "email": "Email",
-                "tel": "Phone", "tel-national": "Phone", "address-level2": "City", "country-name": "Country",
+                "tel": "Phone", "tel-national": "Phone", "address-level2": "City", "address-level1": "Province", "country-name": "Country",
                 "country": "Country"}
 URL_KEYS = {"LinkedIn", "GitHub", "Website"}
 
@@ -52,8 +55,9 @@ URL_KEYS = {"LinkedIn", "GitHub", "Website"}
 ENGLISH = re.compile(r"\b(english|ingl[eé]s)\b", re.I)
 # English proficiency options, best first; the first pattern that matches an option gives its rank.
 LEVELS = [
-    (-1, r"nativ|mother tongue|lengua materna"),   # never chosen: you're not a native speaker
-    (5, r"biling|\bc2\b|expert|fluent|fluid|fluent|full professional|dominio total"),
+    (6, r"biling"),                                 # "Native or bilingual" counts: you are bilingual
+    (-1, r"nativ|mother tongue|lengua materna"),   # Native alone is never chosen: you're not a native speaker
+    (5, r"\bc2\b|expert|fluent|fluid|full professional|dominio total"),
     (3, r"upper.?intermediate|intermedio.?alto|\bb2\b"),
     (4, r"advanced|avanzad|proficien|\bc1\b|professional working"),
     (2, r"intermedi|\bb1\b|conversational|conversacional|limited working"),
@@ -63,7 +67,7 @@ LEVELS = [
 
 
 def english_level(f: FormField) -> str | None:
-    """For an English-level dropdown/radio, the highest level offered below Native (your standing instruction)."""
+    """For an English-level dropdown/radio, the highest level offered; plain "Native" is skipped (your standing instruction)."""
     if f.kind not in CHOICE_KINDS or not ENGLISH.search(f.label):
         return None
     ranked = []
@@ -85,7 +89,10 @@ def is_salary(f: FormField) -> bool:
 
 
 def is_consent(f: FormField) -> bool:
-    return f.kind in ("checkbox", "radio") and bool(CONSENT.search(f.label))
+    if f.kind in ("checkbox", "radio"):
+        return bool(CONSENT.search(f.label))
+    # Dropdowns whose question is about opting in/out or consenting are yours to answer too.
+    return f.kind in ("select", "combobox") and bool(re.search(r"opt.?out|opt.?in|\bconsent", f.label, re.I))
 
 
 def is_free_text(f: FormField) -> bool:
@@ -93,9 +100,9 @@ def is_free_text(f: FormField) -> bool:
 
 
 def is_cv_input(f: FormField, all_fields: list[FormField]) -> bool:
-    if f.kind != "file" or COVER.search(f.label):
+    if f.kind != "file" or COVER.search(f.label) or COVER.search(f.hint):
         return False
-    if CV_LABEL.search(f.label):
+    if CV_LABEL.search(f.label) or CV_LABEL.search(f.hint.replace("_", " ").replace("-", " ")):
         return True
     files = [x for x in all_fields if x.kind == "file"]
     # A lone, unlabelled-ish upload that takes PDFs is the CV slot; with several, only the labelled one is.

@@ -103,12 +103,25 @@ def test_english_level_always_highest():
     assert rules.english_level(f) == "Experto"
     assert rules.plan([f], PROF).local == {f.label: "Experto"}
     g = F("English proficiency", "radio", options=["Native or bilingual", "Full professional", "Elementary"])
-    assert rules.english_level(g) == "Full professional"                     # never Native
+    assert rules.english_level(g) == "Native or bilingual"                   # bilingual counts
     n = F("Nivel de inglés", "select", options=["Básico", "Avanzado", "Nativo"])
-    assert rules.english_level(n) == "Avanzado"
+    assert rules.english_level(n) == "Avanzado"                              # plain Native never
+    m = F("English level", "select", options=["Fluent", "Bilingual", "Native speaker"])
+    assert rules.english_level(m) == "Bilingual"
     h = F("English level", "select", options=["A1", "A2", "B1", "B2", "C1", "C2"])
     assert rules.english_level(h) == "C2"
     i = F("English level", "select", options=["Upper intermediate", "Advanced", "Intermediate"])
     assert rules.english_level(i) == "Advanced"
     assert rules.english_level(F("Do you speak English?", "radio", options=["Yes", "No"])) is None
     assert rules.english_level(F("Nivel de alemán", "select", options=["Básico", "Experto"])) is None
+
+
+def test_province_opt_out_and_resume_hint():
+    prof = profile.parse("## Contact\n- Province: Capital Federal\n")
+    plan = rules.plan([F("State / Province", "combobox"), F("x", autocomplete="address-level1")], prof)
+    assert plan.local == {"State / Province": "Capital Federal", "x": "Capital Federal"}
+    assert rules.is_consent(F("You can choose to opt out of AI screening", "combobox"))
+    assert not rules.is_consent(F("Province", "combobox"))
+    upload = F("Upload a file or drag and drop here", "file", hint="resume")
+    cover = F("Upload a file", "file", hint="cover_letter")
+    assert rules.is_cv_input(upload, [upload, cover]) and not rules.is_cv_input(cover, [upload, cover])

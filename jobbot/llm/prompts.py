@@ -24,8 +24,8 @@ Rules:
 - Write values in the language the form uses.
 - Resolve relative profile values (e.g. "2 weeks from now") against Today in <page>; date fields get a concrete date.
 - Never fill salary / compensation / pay expectation fields: always put them in "unknown".
-- English proficiency "select"/"radio" fields: always choose the highest level among the options, except
-  never "Native" / "Bilingual native" (the applicant is not a native English speaker).
+- English proficiency "select"/"radio" fields: always choose the highest level among the options. An option
+  that says "bilingual" (e.g. "Native or bilingual") is allowed; skip an option that says only "Native".
 - Fields with a current_value that is already correct can be left out.
 - Also extract the job's company, position title, location and posting language (en, es or other).
 {UNTRUSTED}"""
@@ -90,3 +90,24 @@ def drafts_prompt(batch: DraftBatch) -> str:
         f"Role the applicant is targeting: {batch.role or 'not specified'}\n\n"
         f"<questions>\n{json.dumps(qs, ensure_ascii=False)}\n</questions>"
     )
+
+
+JOB_SCHEMA = {
+    "type": "object", "additionalProperties": False, "required": ["company", "position", "location"],
+    "properties": {"company": {"type": "string"}, "position": {"type": "string"}, "location": {"type": "string"}},
+}
+
+JOB_SYSTEM = f"""You read a job posting page and return the hiring company, the job title and the job location.
+Use "" for anything the page doesn't state. If the page is an "Apply to <name>" dialog, <name> is the company.
+Return JSON matching the provided schema, nothing else.
+{UNTRUSTED}"""
+
+
+def job_prompt(url: str, title: str, headings: dict, text: str) -> str:
+    heads = "\n".join(f"{k}: {v}" for k, v in headings.items())
+    return (f"<page>\nURL: {url}\nTitle: {title}\n{heads}\n</page>\n\n"
+            f"<job_posting>\n{text[:MAP_JOB_CHARS]}\n</job_posting>")
+
+
+def clean_meta(value: object) -> str:
+    return " ".join(str(value).split())[:200]

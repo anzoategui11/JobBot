@@ -2,7 +2,7 @@
 // Written as one expression (IIFE) so it works both as an init script and via frame.evaluate().
 // No innerHTML anywhere: some sites enforce Trusted Types.
 (() => {
-  const VERSION = 6;                       // bump when this file changes: tabs with an older copy get this one
+  const VERSION = 8;                       // bump when this file changes: tabs with an older copy get this one
   if ((window.__jobbotLoaded || 0) >= VERSION) return;
   window.__jobbotLoaded = VERSION;
   const me = {};
@@ -144,6 +144,15 @@
     return got;
   }
 
+  // Text a dropdown shows when nothing is chosen yet.
+  const PLACEHOLDER = /^\s*(select( one| an option|\.\.\.|…)?|choose( one| an option)?|please select|seleccion[ae]( una opci[oó]n)?|elige( una opci[oó]n)?|--+|—|-)?\s*$/i;
+
+  function hintOf(el) {
+    // Developer names often say what a field is even when the visible label doesn't ("resume", "cv_upload").
+    return squash([el.getAttribute("name"), el.id, el.getAttribute("data-ui"), el.getAttribute("data-automation-id"),
+                   el.getAttribute("data-qa"), el.getAttribute("data-testid")].filter(Boolean).join(" "), 120);
+  }
+
   function cleanLabel(s) {
     const required = /\*\s*$|\(required\)\s*$/i.test(s);
     return { text: squash(s.replace(/\s*(\*|\(required\))\s*$/i, ""), 200), required };
@@ -166,6 +175,7 @@
       } else if (tagName === "SELECT") kind = "select";
       else if (tagName === "TEXTAREA") kind = "textarea";
       else if (el.getAttribute("role") === "combobox" && !el.querySelector("input,select")) kind = "combobox";
+      else if (tagName === "BUTTON" && el.getAttribute("aria-haspopup") === "listbox") kind = "combobox";   // Workday
       else if (el.getAttribute("role") === "radio") kind = "aria-radio";
       else if (el.isContentEditable && !(el.parentElement && el.parentElement.isContentEditable)) kind = "textarea";
       if (!kind) continue;
@@ -200,7 +210,7 @@
       const lab = cleanLabel(kind === "checkbox" ? [groupLabel(el), labelFor(el)].filter(Boolean).join(" — ")
                                                  : labelFor(el));
       const f = { id: tag(el), kind, label: lab.text, options: [], autocomplete: squash(el.getAttribute("autocomplete"), 40),
-                  accept: squash(el.getAttribute("accept"), 100),
+                  accept: squash(el.getAttribute("accept"), 100), hint: hintOf(el),
                   required: lab.required || !!el.required || el.getAttribute("aria-required") === "true",
                   current_value: "" };
       if (kind === "select") {
@@ -211,7 +221,7 @@
       } else if (kind === "checkbox") f.current_value = el.checked ? "true" : "false";
       else if (kind === "file") f.current_value = el.files && el.files.length ? el.files[0].name : "";
       else if (kind === "password") f.current_value = el.value ? "(filled)" : "";   // never read a password out
-      else if (kind === "combobox" && tagName !== "INPUT") f.current_value = textOf(el);
+      else if (kind === "combobox" && tagName !== "INPUT") f.current_value = PLACEHOLDER.test(textOf(el)) ? "" : textOf(el);
       else if (el.isContentEditable) f.current_value = squash(el.innerText, 300);
       else f.current_value = squash(el.value, 300);
       if (kind === "combobox") {
@@ -286,7 +296,15 @@
       opt.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
   }
 
+  let lastSeen = [];
+
+  function closeList(el) {
+    for (const t of [el, document.activeElement, document.body])
+      if (t) t.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
+  }
+
   async function pickOption(el, value) {
+    lastSeen = [];
     // Wait for the dropdown list, then choose the option that matches (exact first, then prefix/contains).
     for (let i = 0; i < 15; i++) {
       await sleep(100);
@@ -299,6 +317,7 @@
                   opts.find((o) => textOf(o).toLowerCase().startsWith(want)) ||
                   opts.find((o) => textOf(o).toLowerCase().includes(want));
       if (hit) { pressOption(hit); return true; }
+      lastSeen = opts.map((o) => textOf(o)).filter(Boolean).slice(0, 150);
     }
     return false;
   }
@@ -307,9 +326,34 @@
     return el.isContentEditable && !("value" in el) ? el.innerText : (el.value || "");
   }
 
+  function valueOf(id) {
+    // What the field shows now, in the same terms the extractor reports (option text, "true"/"false").
+    const els = elementsFor(id);
+    const el = els[0];
+    if (!el) return null;
+    if (els.length > 1 || el.getAttribute("role") === "radio" || (el.tagName === "INPUT" && el.type === "radio")) {
+      const on = els.find((e) => e.getAttribute("role") === "radio" ? e.getAttribute("aria-checked") === "true" : e.checked);
+      return on ? on.getAttribute("data-jobbot-opt") || "" : "";
+    }
+    if (el.tagName === "INPUT" && el.type === "checkbox") return el.checked ? "true" : "false";
+    if (el.tagName === "INPUT" && el.type === "password") return el.value ? "(filled)" : "";
+    if (el.tagName === "SELECT") { const o = el.selectedOptions[0]; return o && o.value ? squash(o.text, 120) : ""; }
+    if ((el.getAttribute("role") === "combobox" && el.tagName !== "INPUT") || el.tagName === "BUTTON")
+      return PLACEHOLDER.test(textOf(el)) ? "" : textOf(el);
+    return currentText(el);
+  }
+
+  // Report edits to tagged fields as they happen, so "save your edits" still works after the step is gone
+  // (Easy Apply "Next", or the form disappearing after you submit).
+  document.addEventListener("change", (e) => {
+    const t = e.composedPath ? e.composedPath()[0] : e.target;
+    const id = t && t.getAttribute && t.getAttribute("data-jobbot-id");
+    if (id) send({ type: "edit", id, value: valueOf(id) });
+  }, true);
+
   window.__jobbotValues = (ids) => {
     const out = {};
-    for (const id of ids) { const el = elementsFor(id)[0]; out[id] = el ? currentText(el) : null; }
+    for (const id of ids) out[id] = valueOf(id);
     return out;
   };
 
@@ -339,10 +383,16 @@
       if (el.tagName === "INPUT") {
         el.focus({ preventScroll: true });
         setNative(el, value);
-        return (await pickOption(el, value)) ? "ok" : "typed";      // typed but nothing picked from the list
+        if (await pickOption(el, value)) return "ok";
+        if (!lastSeen.length) return "typed";                          // typed, no suggestion list appeared
+        setNative(el, "");
+        closeList(el);
+        return { status: "choose", options: lastSeen };
       }
       pressOption(el);                                                // open a div-based dropdown
-      return (await pickOption(el, value)) ? "ok" : "manual";
+      if (await pickOption(el, value)) return "ok";
+      closeList(el);
+      return lastSeen.length ? { status: "choose", options: lastSeen } : "manual";
     }
     if (el.isContentEditable && !("value" in el)) {
       el.focus({ preventScroll: true });
@@ -403,6 +453,8 @@
     li { margin: 2px 0; }
     .notes { font-size: 12px; color: #777; }
     .conflict { margin: 0 0 10px; }
+    .logbar { margin: 12px 0 4px; }
+    .learn { font-size: 13px; margin: 3px 0; align-items: flex-start; }
     .rolebar { display: flex; gap: 8px; align-items: center; font-weight: 500; margin: 0 0 10px; }
     .rolebar select { flex: 1; padding: 4px 6px; font: inherit; border: 1px solid #bbb; border-radius: 6px;
                       background: #fff; color: inherit; }
@@ -537,6 +589,48 @@
       }
       if (spec.manual && spec.manual.length) {
         parts.push(el("h4", { text: "Do these yourself" }), el("ul", {}, ...spec.manual.map((m) => el("li", { text: m }))));
+      }
+      if (spec.learn && spec.learn.length) {
+        parts.push(el("h4", { text: "Save your edits to profile.md?" }));
+        const list = el("div");
+        for (const item of spec.learn) {
+          const cb = el("input", { type: "checkbox" });
+          cb.checked = true;
+          cb.dataset.lid = item.lid;
+          list.append(el("label", { class: "save learn" }, cb, document.createTextNode(`${item.label}: ${item.value}`)));
+        }
+        const go = el("button", { class: "small", text: "Save selected" });
+        go.addEventListener("click", () => {
+          go.disabled = true;
+          send({ type: "learn", ids: [...list.querySelectorAll("[data-lid]")].filter((c) => c.checked).map((c) => c.dataset.lid) });
+        });
+        parts.push(list, go);
+      }
+      if (spec.log_form) {
+        parts.push(el("h4", { text: "Log this application" }));
+        const form = el("div");
+        const names = [["portal", "Portal"], ["company", "Company"], ["position", "Position"],
+                       ["link", "Application link"], ["location", "Location"], ["salary", "Expected salary"],
+                       ["notes", "Notes"]];
+        for (const [key, label] of names) {
+          const input = el("input", { type: "text", id: `jb-log-${key}` });
+          input.value = spec.log_form[key] || "";
+          input.dataset.logKey = key;
+          form.append(el("div", { class: "q" }, el("label", { class: "t", for: `jb-log-${key}`, text: label }), input));
+        }
+        const save = el("button", { class: "go", text: "Save to applications.csv" });
+        save.addEventListener("click", () => {
+          const row = {};
+          for (const i of form.querySelectorAll("[data-log-key]")) row[i.dataset.logKey] = i.value;
+          save.disabled = true;
+          save.textContent = "Saving…";
+          send({ type: "log", row });
+        });
+        parts.push(form, save);
+      } else if (spec.can_log) {
+        const btn = el("button", { class: "small logbtn", text: "Log as applied" });
+        btn.addEventListener("click", () => { btn.disabled = true; send({ type: "log_form" }); });
+        parts.push(el("div", { class: "logbar" }, btn));
       }
       if (spec.notes && spec.notes.length) {
         parts.push(el("h4", { text: "Details" }),

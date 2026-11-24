@@ -6,7 +6,7 @@ from pathlib import Path
 from playwright.async_api import Page, async_playwright
 
 from .config import Config
-from . import fields
+from . import applog, fields
 from .flow import Session
 from .llm import get_backend
 from .launcher import ensure_brave
@@ -46,9 +46,13 @@ async def run(cfg: Config) -> None:
         ctx = browser.contexts[0]
         backend = get_backend(cfg)
         session = Session(cfg.data_dir / "profile.md", cfg.cv_path, backend, script)
+        if n := applog.flush_pending(session.log_path):
+            print(f"Wrote {n} pending application(s) to {session.log_path.name}.", flush=True)
+        ctx.on("page", session.provenance.track)            # new tabs: remember who opened them
         await ctx.expose_binding(BINDING, session.handle)
         await ctx.add_init_script(script=script)
         for page in ctx.pages:
+            session.provenance.track(page)
             await inject_existing(page, script)
 
         closed = asyncio.Event()

@@ -1,0 +1,36 @@
+<!doctype html><html><head><title>Application Questions - Acme Careers</title></head><body>
+<main><h2>Application Questions</h2>
+<div><label for="q1">Are you currently legally authorized to work in the country where this job is located?<abbr>*</abbr></label>
+  <button id="q1" type="button" aria-haspopup="listbox" data-opts="Yes|No">Select One</button></div>
+<div><label for="q2">Province</label>
+  <button id="q2" type="button" aria-haspopup="listbox" data-opts="Buenos Aires|Ciudad Autónoma de Buenos Aires|Córdoba">Select One</button></div>
+<div><label for="q3">You can choose to opt out of the artificial intelligence screening process.</label>
+  <button id="q3" type="button" aria-haspopup="listbox" data-opts="Yes, opt out|No">Select One</button></div>
+<div><label for="q4">Have you worked on a project with Acme in the past 24 months?</label>
+  <button id="q4" type="button" aria-haspopup="listbox" data-opts="Yes|No">Select One</button></div>
+<section><h3>Resume</h3><div class="drop"><span>Upload a file or drag and drop here</span>
+  <input type="file" data-ui="resume" style="display:none"></div></section>
+<section><h3>Cover letter</h3><div class="drop"><span>Upload a file</span>
+  <input type="file" data-ui="cover_letter" style="display:none"></div></section>
+</main>
+<script>
+  // Workday-style dropdown: the option list only exists while open, attached to <body>.
+  let open = null;
+  function close() { if (open) { open.remove(); open = null; } }
+  for (const b of document.querySelectorAll("button[aria-haspopup=listbox]")) {
+    b.addEventListener("click", () => {
+      close();
+      open = document.createElement("ul");
+      open.setAttribute("role", "listbox");
+      for (const t of b.dataset.opts.split("|")) {
+        const li = document.createElement("li");
+        li.setAttribute("role", "option");
+        li.textContent = t;
+        li.addEventListener("click", () => { b.textContent = t; close(); });
+        open.append(li);
+      }
+      document.body.append(open);
+    });
+  }
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") close(); });
+</script></body></html>

@@ -27,9 +27,11 @@ async def values(ex: Extraction, ids: list[str]) -> dict[str, str | None]:
     return out
 
 
-async def apply(ex: Extraction, fills: dict[str, str], if_empty: bool = False) -> dict[str, str]:
+async def apply(ex: Extraction, fills: dict[str, str], if_empty: bool = False,
+                choices: dict[str, list[str]] | None = None) -> dict[str, str]:
     """Fill {field id: value}. Returns {field id: status} ("ok", "typed", "manual", "no such option", ...).
-    if_empty: leave fields you've typed into meanwhile alone ("kept")."""
+    if_empty: leave fields you've typed into meanwhile alone ("kept").
+    choices: filled with {id: options seen} for dropdowns whose list had no match (status "choose")."""
     by_id = {f.id: f for f in ex.fields}
     per_frame: dict[Frame, list[dict]] = {}
     for fid, value in fills.items():
@@ -41,7 +43,13 @@ async def apply(ex: Extraction, fills: dict[str, str], if_empty: bool = False) -
     out: dict[str, str] = {}
     for frame, items in per_frame.items():
         try:
-            out.update(await frame.evaluate("items => window.__jobbotFill(items)", items))
+            got = await frame.evaluate("items => window.__jobbotFill(items)", items)
+            for fid, s in got.items():
+                if isinstance(s, dict):              # dropdown opened but nothing matched: its options
+                    if choices is not None:
+                        choices[fid] = [str(o)[:120] for o in s.get("options") or []][:150]
+                    s = str(s.get("status", "choose"))
+                out[fid] = s
         except Exception as e:                       # frame navigated away mid-fill
             out.update({i["id"]: f"error: {type(e).__name__}" for i in items})
     return out
